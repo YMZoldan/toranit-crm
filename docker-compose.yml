@@ -1,0 +1,54 @@
+# Toranit cable planner: app + its own PostgreSQL, published through your existing Traefik.
+services:
+  app:
+    build: .
+    image: toranit/cable-planner:latest
+    container_name: cameras-app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://cameras:${POSTGRES_PASSWORD}@db:5432/cameras
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.cameras.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.cameras.entrypoints=${TRAEFIK_ENTRYPOINT}
+      - traefik.http.routers.cameras.tls=true
+      - traefik.http.routers.cameras.tls.certresolver=${TRAEFIK_CERTRESOLVER}
+      - traefik.http.services.cameras.loadbalancer.server.port=3000
+
+  db:
+    image: postgres:16-alpine
+    container_name: cameras-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cameras
+      POSTGRES_USER: cameras
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cameras -d cameras"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+volumes:
+  pgdata:
+  uploads:
+
+networks:
+  internal:
+  proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK}

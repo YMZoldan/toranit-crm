@@ -1,0 +1,31 @@
+{
+  "name": "Toranit – מתכנן כבילה ו־CRM",
+  "short_name": "Toranit",
+  "description": "תכנון כבילה, תמחור, הצעות מחיר ומעקב להתקנות מצלמות",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "dir": "rtl",
+  "lang": "he",
+  "background_color": "#f3f3f6",
+  "theme_color": "#272336",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
