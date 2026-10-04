@@ -27,7 +27,7 @@ echo
 cat "$KEY.pub"
 echo
 read -rp "Press Enter after you added the key... " _
-until ssh -T github-toranit 2>&1 | grep -q "successfully authenticated"; do
+until out=$(ssh -T github-toranit 2>&1 || true); [[ "$out" == *"successfully authenticated"* ]]; do
   read -rp "GitHub does not accept the key yet. Check the steps above and press Enter to retry... " _
 done
 rm -rf /opt/cameras-src

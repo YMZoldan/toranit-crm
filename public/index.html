@@ -423,6 +423,11 @@ function normCatalog(c){
   c.labor = Object.assign(d.labor, c.labor || {});
   c.defaults = Object.assign(d.defaults, c.defaults || {});
   ['cameras','conduits','items'].forEach(k => { if (!Array.isArray(c[k])) c[k] = d[k]; c[k].forEach(o => { if (!o.id) o.id = uid(k[0]); }); });
+  c.counters = Array.isArray(c.counters) ? c.counters : [];
+  c.items.forEach(it => {
+    if (it.base === undefined){ it.base = {proj:'proj', cam:'cams', net2:'netCables'}[it.auto] || ''; it.per = it.auto === 'net2' ? 2 : 1; }
+    if (it.per === undefined || it.per === null || it.per === '') it.per = 1;
+  });
   c.sumit = Object.assign({draft:true, typeList:[], rawTypes:''}, c.sumit || {});
   c.service = Object.assign({hourly:0, callout:0}, c.service || {});
   c.billing = Object.assign({termsDays:30}, c.billing || {});
@@ -457,6 +462,7 @@ function normalize(p){
   p.laborAdj = +p.laborAdj || 0;
   p.status = STATUS[p.status] ? p.status : 'lead';
   p.customerId = p.customerId || null;
+  p.counters = p.counters && typeof p.counters === 'object' ? p.counters : {};
   let maxId = 0; p.shapes.concat(p.cables).forEach(o => { if (o.id > maxId) maxId = o.id; });
   p.nextId = Math.max(p.nextId || 1, maxId + 1);
   return p;
@@ -666,7 +672,8 @@ function render(){
     out += '<path d="'+pathD(cb.pts,false)+'" fill="none" stroke="'+cb.color+'" stroke-width="'+(hi?5:3)+'" stroke-linejoin="round" stroke-linecap="round"'+(cb.type==='power'?' stroke-dasharray="10 5"':'')+'/>';
     const s0 = w2s(cb.pts[0]), se = w2s(cb.pts[cb.pts.length-1]);
     out += '<rect x="'+(s0.x-7)+'" y="'+(s0.y-7)+'" width="14" height="14" rx="2" fill="'+cb.color+'" class="nvr"/>';
-    out += '<circle cx="'+se.x+'" cy="'+se.y+'" r="8" fill="'+cb.color+'" class="nvr"/><circle cx="'+se.x+'" cy="'+se.y+'" r="3" fill="var(--canvas)"/>';
+    if (NET[cb.type] && !(cb.cam && camById(cb.cam))) out += '<rect x="'+(se.x-7)+'" y="'+(se.y-7)+'" width="14" height="14" rx="3" fill="var(--canvas)" stroke="'+cb.color+'" stroke-width="3"/><circle cx="'+se.x+'" cy="'+se.y+'" r="2.2" fill="'+cb.color+'"/>';
+    else out += '<circle cx="'+se.x+'" cy="'+se.y+'" r="8" fill="'+cb.color+'" class="nvr"/><circle cx="'+se.x+'" cy="'+se.y+'" r="3" fill="var(--canvas)"/>';
     let bi = 0, bl = -1; for (let i=1;i<cb.pts.length;i++){ const l = dist(cb.pts[i-1],cb.pts[i]); if (l > bl){ bl = l; bi = i; } }
     if (bi) labels += segLabel(cb.pts[bi-1], cb.pts[bi], (warn?'⚠ ':'')+fmt(cableTotal(cb))+'m', '', warn ? 'var(--danger)' : cb.color, -15);
     labels += labelAt(se.x, se.y-18, cb.name, 'sm');
@@ -762,7 +769,7 @@ function renderPanel(){
     box.innerHTML = '<h2>כבל</h2>'+
       '<div class="row"><span>שם</span><input type="text" id="cName" value="'+esc(c.name)+'"></div>'+
       '<div class="row"><span>סוג</span><select id="cType">'+Object.keys(TYPES).map(k => '<option value="'+k+'"'+(c.type===k?' selected':'')+'>'+TYPES[k]+'</option>').join('')+'</select><input type="color" id="cColor" value="'+c.color+'" aria-label="צבע"></div>'+
-      '<div class="row"><span>מצלמה</span><select id="cCam" style="max-width:190px"><option value="">ללא מצלמה</option>'+cat.cameras.map(m => '<option value="'+m.id+'"'+(c.cam===m.id?' selected':'')+'>'+esc(camLabel(m)||'ללא שם')+'</option>').join('')+'</select></div>'+
+      '<div class="row"><span>מצלמה</span><select id="cCam" style="max-width:190px"><option value="">'+(NET[c.type] ? 'נקודת רשת (בלי מצלמה)' : 'ללא מצלמה')+'</option>'+cat.cameras.map(m => '<option value="'+m.id+'"'+(c.cam===m.id?' selected':'')+'>'+esc(camLabel(m)||'ללא שם')+'</option>').join('')+'</select></div>'+
       (c.cam ? '<div class="row"><span>כיוון צילום</span><span class="rng"><input type="range" id="cDir" min="0" max="355" step="5" value="'+(+c.dir||0)+'"><span class="num" id="vDir">'+(+c.dir||0)+'°</span></span></div>' : '')+
       '<div class="row"><span>צינור או תעלה</span><select id="cCond" style="max-width:190px"><option value="">ללא</option>'+cat.conduits.map(m => '<option value="'+m.id+'"'+(c.conduit===m.id?' selected':'')+'>'+esc(m.name||'ללא שם')+'</option>').join('')+'</select></div>'+
       (c.conduit ? '<div class="row"><span>אורך צינור (מ׳)</span><span><input type="number" id="cCondLen" min="0" step="0.5" value="'+fmt(c.conduitLen)+'"> <button id="cCondAll">כל האורך</button></span></div>' : '')+
@@ -1540,7 +1547,33 @@ const r2 = v => Math.round((+v||0)*100)/100;
 const camById = id => cat.cameras.find(c => c.id === id);
 const condById = id => cat.conduits.find(c => c.id === id);
 const camLabel = m => m ? [m.brand, m.model, m.lens, m.res].filter(Boolean).join(' ') : '';
-const AUTO = {'':'ידני', proj:'1 לפרויקט', cam:'לכל מצלמה', net2:'2 לכל כבל רשת'};
+function autoBases(){
+  const b = [['', 'ידני (מקלידים כמות בכל פרויקט)'], ['proj', 'לפרויקט'], ['cams', 'מצלמות'], ['netPoints', 'נקודות רשת (כבל רשת בלי מצלמה)'],
+    ['netCables', 'כבלי רשת (מצלמות + נקודות)'], ['coax', 'כבלי קואקס'], ['power', 'כבלי חשמל'], ['cables', 'כל הכבלים'], ['meters', 'מטר כבל, כל הסוגים']];
+  cat.cameras.forEach(m => b.push(['cam:' + m.id, 'מצלמות מדגם ' + (camLabel(m) || 'ללא שם')]));
+  cat.counters.forEach(c => b.push(['cnt:' + c.id, c.name || 'מונה ללא שם']));
+  return b;
+}
+function autoCtx(p){
+  const ctx = {proj:1, cams:0, netPoints:0, netCables:0, coax:0, power:0, cables:p.cables.length, meters:0};
+  p.cables.forEach(c => {
+    const hasCam = !!(c.cam && camById(c.cam));
+    if (hasCam){ ctx.cams++; ctx['cam:' + c.cam] = (ctx['cam:' + c.cam] || 0) + 1; }
+    if (NET[c.type]){ ctx.netCables++; if (!hasCam) ctx.netPoints++; }
+    if (c.type === 'coax') ctx.coax++;
+    if (c.type === 'power') ctx.power++;
+    ctx.meters += polyLen(c.pts, false) + (+c.extra || 0);
+  });
+  ctx.meters = Math.ceil(ctx.meters);
+  Object.keys(p.counters || {}).forEach(k => { ctx['cnt:' + k] = +p.counters[k] || 0; });
+  return ctx;
+}
+function ruleLabel(it){
+  if (!it.base) return 'ידני';
+  const b = autoBases().find(x => x[0] === it.base);
+  const per = +it.per;
+  return (per !== 1 ? numf(per) + ' × ' : '') + (b ? b[1].replace(/ \(.*\)$/, '') : 'בסיס שנמחק');
+}
 const ST = {todo:'לא התחיל', doing:'בביצוע', done:'הושלם'};
 const card = (t, body) => '<div class="card"><h3>'+t+'</h3>'+body+'</div>';
 const fld = (label, path, type) => '<label>'+label+'<input type="'+(type||'text')+'" data-b="'+path+'"'+(type==='number'?' data-num step="any"':'')+'></label>';
@@ -1586,7 +1619,7 @@ function setView(v){
 function renderPage(){ const pg = $('#page'); if (viewMode === 'service') renderService(pg); else if (viewMode === 'billing') renderBilling(pg); else if (viewMode === 'customers') renderCustomers(pg); else if (viewMode === 'dash') renderDash(pg); else if (viewMode === 'price') renderPricing(pg); else if (viewMode === 'track') renderTrack(pg); else if (viewMode === 'catalog') renderCatalog(pg); }
 
 /* ---------- pricing calculation ---------- */
-function autoQty(it, ctx){ return it.auto === 'cam' ? ctx.cams : it.auto === 'net2' ? ctx.netCables*2 : it.auto === 'proj' ? 1 : 0; }
+function autoQty(it, ctx){ if (!it.base) return 0; return Math.max(0, Math.ceil((+ctx[it.base] || 0) * (+it.per || 0) - 1e-9)); }
 function calc(){
   const s = state, pr = s.pricing, w = (+s.settings.waste || 0)/100, L = cat.labor, lines = [];
   const camCount = {}; let cams = 0, netCables = 0;
@@ -1597,7 +1630,7 @@ function calc(){
   const cm = {}; let condM = 0;
   s.cables.forEach(c => { if (c.conduit && condById(c.conduit) && c.conduitLen > 0){ cm[c.conduit] = (cm[c.conduit]||0) + c.conduitLen; condM += c.conduitLen; } });
   Object.keys(cm).forEach(id => lines.push({sec:'צנרת ותעלות', name:condById(id).name||'צינור', qty:Math.ceil(cm[id]*(1+w)), unit:'מ׳', cost:+condById(id).cost||0}));
-  const ctx = {cams, netCables};
+  const ctx = autoCtx(s);
   cat.items.forEach(it => { const ov = s.qty[it.id]; const q = ov != null && ov !== '' ? +ov : autoQty(it, ctx); if (q > 0) lines.push({sec:'ציוד נוסף', name:it.name||'פריט', qty:q, unit:it.unit||'יח׳', cost:+it.cost||0}); });
   s.custom.forEach(c => { if (+c.qty > 0) lines.push({sec:'שונות', name:c.name||'פריט', qty:+c.qty, unit:c.unit||'יח׳', cost:+c.cost||0}); });
   const pe = 1 + (+pr.profitEq||0)/100;
@@ -1616,7 +1649,7 @@ function calc(){
 function renderPricing(pg){
   const s = state;
   const opt = (list, v, none, lab) => (none != null ? '<option value="">'+none+'</option>' : '') + list.map(m => '<option value="'+m.id+'"'+(m.id===v?' selected':'')+'>'+esc(lab(m))+'</option>').join('');
-  const ctx = {cams:s.cables.filter(c => c.cam && camById(c.cam)).length, netCables:s.cables.filter(c => NET[c.type]).length};
+  const ctx = autoCtx(s);
   let h = '<div class="pg"><div class="pghead"><div><h2 style="margin:0">תמחור והצעת מחיר</h2><p class="muted">'+esc(s.name)+'</p>'+
     '<label class="chk" style="margin-top:6px">סטטוס <select data-b="status">'+Object.keys(STATUS).map(k => '<option value="'+k+'">'+STATUS[k]+'</option>').join('')+'</select></label></div>'+
     '<div class="btns" style="margin:0">'+(sumitReady() ? '<button class="primary" id="gSQuote">הצעת מחיר דרך סאמיט</button><button id="gSPay">דרישת תשלום</button><button id="gSRec">קבלה</button>' : '')+
@@ -1634,7 +1667,7 @@ function renderPricing(pg){
     t = '<div class="tblw"><table class="tbl"><thead><tr><th>#</th><th>שם</th><th>דגם מצלמה</th><th>סוג כבל</th><th>אורך כבל</th><th>צינור או תעלה</th><th>אורך צינור (מ׳)</th></tr></thead><tbody>';
     s.cables.forEach((c,i) => {
       t += '<tr><td>'+(i+1)+'</td><td><input type="text" data-b="cables.'+i+'.name"></td>'+
-        '<td><select data-b="cables.'+i+'.cam">'+opt(cat.cameras, c.cam, 'ללא מצלמה', m => camLabel(m)||'ללא שם')+'</select></td>'+
+        '<td><select data-b="cables.'+i+'.cam">'+opt(cat.cameras, c.cam, NET[c.type] ? 'נקודת רשת (בלי מצלמה)' : 'ללא מצלמה', m => camLabel(m)||'ללא שם')+'</select></td>'+
         '<td><select data-b="cables.'+i+'.type" data-re>'+Object.keys(TYPES).map(k => '<option value="'+k+'"'+(k===c.type?' selected':'')+'>'+TYPES[k]+'</option>').join('')+'</select></td>'+
         '<td class="n">'+fmt(cableTotal(c))+' m</td>'+
         '<td><select data-b="cables.'+i+'.conduit" data-re>'+opt(cat.conduits, c.conduit, 'ללא', m => m.name||'ללא שם')+'</select></td>'+
@@ -1645,8 +1678,11 @@ function renderPricing(pg){
   h += card('מצלמות וכבלים', t);
   t = '<p class="muted">השאר כמות ריקה לחישוב אוטומטי, או הקלד מספר כדי לקבוע כמות ידנית.</p><div class="tblw"><table class="tbl"><thead><tr><th>פריט</th><th>חישוב אוטומטי</th><th>כמות</th><th>עלות ליחידה</th></tr></thead><tbody>';
   cat.items.forEach(it => { const a = autoQty(it, ctx);
-    t += '<tr><td>'+esc(it.name||'ללא שם')+'</td><td class="muted">'+AUTO[it.auto||'']+(it.auto ? ' ('+a+')' : '')+'</td><td><input type="number" min="0" step="1" data-num data-nullable data-b="qty.'+it.id+'" placeholder="'+a+'"></td><td class="n">'+money(it.cost)+'</td></tr>'; });
-  t += '</tbody></table></div><h4>שורות נוספות להצעה</h4>';
+    t += '<tr><td>'+esc(it.name||'ללא שם')+'</td><td class="muted">'+esc(ruleLabel(it))+(it.base ? ' = '+a : '')+'</td><td><input type="number" min="0" step="1" data-num data-nullable data-b="qty.'+it.id+'" placeholder="'+a+'"></td><td class="n">'+money(it.cost)+'</td></tr>'; });
+  t += '</tbody></table></div>';
+  if (cat.counters.length) t += '<h4>מונים בפרויקט הזה</h4><div class="frm">' + cat.counters.map(c => '<label>'+esc(c.name || 'מונה')+'<input type="number" min="0" step="any" data-cnt="'+c.id+'" value="'+(+(s.counters || {})[c.id] || 0)+'"></label>').join('') + '</div>';
+  t += '<p class="muted" style="margin-top:6px">בפרויקט: '+ctx.cams+' מצלמות, '+ctx.netPoints+' נקודות רשת, '+ctx.netCables+' כבלי רשת. הגדרת חישוב הכמויות נמצאת במחירון ← ציוד נוסף.</p>';
+  t += '<h4>שורות נוספות להצעה</h4>';
   if (s.custom.length){
     t += '<div class="tblw"><table class="tbl"><thead><tr><th>תיאור</th><th>כמות</th><th>יחידה</th><th>עלות ליחידה</th><th></th></tr></thead><tbody>';
     s.custom.forEach((c,i) => { t += '<tr><td><input type="text" data-b="custom.'+i+'.name"></td><td><input type="number" min="0" step="any" data-num data-b="custom.'+i+'.qty"></td><td><input type="text" data-b="custom.'+i+'.unit" style="min-width:60px;width:70px"></td><td><input type="number" min="0" step="any" data-num data-b="custom.'+i+'.cost"></td><td><button data-delc="'+i+'" class="danger" aria-label="מחק שורה">✕</button></td></tr>'; });
@@ -1664,6 +1700,7 @@ function renderPricing(pg){
     save();
     if ('re' in el.dataset) renderPricing(pg); else renderCalc();
   });
+  pg.querySelectorAll('[data-cnt]').forEach(inp => inp.addEventListener('change', () => { state.counters = state.counters || {}; state.counters[inp.dataset.cnt] = Math.max(0, +inp.value || 0); save(); renderPricing(pg); }));
   $('#addCustom').addEventListener('click', () => { state.custom.push({id:uid('u'), name:'', qty:1, unit:'יח׳', cost:0}); save(); renderPricing(pg); });
   pg.querySelectorAll('[data-delc]').forEach(b => b.addEventListener('click', () => { state.custom.splice(+b.dataset.delc, 1); save(); renderPricing(pg); }));
   $('#gQuote').addEventListener('click', runJob($('#gQuote'), makeQuote));
@@ -1683,8 +1720,8 @@ function renderCalc(){
   const zero = c.lines.filter(l => !l.cost).map(l => esc(l.name));
   if (zero.length) warn.push('אין מחיר עלות ל: ' + zero.join(', ') + '. עדכן ב"מחירון".');
   if (!(+L.hourly > 0)) warn.push('לא הוגדרה עלות שעת עבודה ב"מחירון".');
-  const noCam = state.cables.filter(x => (NET[x.type] || x.type === 'coax') && !(x.cam && camById(x.cam))).length;
-  if (noCam) warn.push(noCam + ' כבלי רשת או קואקס בלי דגם מצלמה, ולכן הם לא נספרים כמצלמות.');
+  const noCam = state.cables.filter(x => x.type === 'coax' && !(x.cam && camById(x.cam))).length;
+  if (noCam) warn.push(noCam + ' כבלי קואקס בלי דגם מצלמה, ולכן הם לא נספרים כמצלמות.');
   let h = warn.length ? '<div class="warnbox">' + warn.join('<br>') + '</div>' : '';
   h += '<div class="card"><h3>טבלת תמחור פנימית</h3><div class="tblw"><table class="tbl"><thead><tr><th>תיאור</th><th>כמות</th><th>עלות ליח׳</th><th>עלות</th><th>מחיר ליח׳ ללקוח</th><th>מחיר ללקוח</th></tr></thead><tbody>';
   let sec = '';
@@ -1776,11 +1813,18 @@ function renderCatalog(pg){
   cat.conduits.forEach((m,i) => { t += '<tr><td><input type="text" data-b="conduits.'+i+'.name"></td><td><input type="number" min="0" step="any" data-num data-b="conduits.'+i+'.cost"></td><td><button class="danger" data-del="conduits.'+i+'" aria-label="מחק צינור">✕</button></td></tr>'; });
   t += '</tbody></table></div><div class="btns"><button data-add="conduits">הוסף צינור או תעלה</button></div>';
   h += card('כבלים וצנרת', t);
-  t = '<div class="tblw"><table class="tbl"><thead><tr><th>פריט</th><th>יחידה</th><th>עלות (₪)</th><th>כמות אוטומטית</th><th></th></tr></thead><tbody>';
+  t = '<div class="tblw"><table class="tbl"><thead><tr><th>פריט</th><th>יחידה</th><th>עלות (₪)</th><th>כמות אוטומטית: מספר × לכל</th><th></th></tr></thead><tbody>';
   cat.items.forEach((m,i) => { t += '<tr><td><input type="text" data-b="items.'+i+'.name"></td><td><input type="text" data-b="items.'+i+'.unit" style="min-width:60px;width:70px"></td><td><input type="number" min="0" step="any" data-num data-b="items.'+i+'.cost"></td>'+
-    '<td><select data-b="items.'+i+'.auto">'+Object.keys(AUTO).map(k => '<option value="'+k+'">'+AUTO[k]+'</option>').join('')+'</select></td><td><button class="danger" data-del="items.'+i+'" aria-label="מחק פריט">✕</button></td></tr>'; });
-  t += '</tbody></table></div><div class="btns"><button data-add="items">הוסף פריט</button></div>';
+    '<td style="white-space:nowrap"><input type="number" min="0" step="any" data-num data-b="items.'+i+'.per" style="width:62px"'+(m.base ? '' : ' disabled')+'> × <select data-b="items.'+i+'.base" data-re style="max-width:240px">'+autoBases().map(b => '<option value="'+esc(b[0])+'">'+esc(b[1])+'</option>').join('')+'</select></td><td><button class="danger" data-del="items.'+i+'" aria-label="מחק פריט">✕</button></td></tr>'; });
+  t += '</tbody></table></div><div class="btns"><button data-add="items">הוסף פריט</button></div>'+
+    '<p class="muted" style="margin-top:8px">דוגמאות: מחבר RJ45 = 2 × כבלי רשת. שקע רשת = 1 × נקודות רשת. זרוע קיר = 1 × מצלמות מדגם צינור. מספר עשרוני מעוגל למעלה, למשל 0.25 × מצלמות לקופסת חיבור לכל 4 מצלמות.</p>';
   h += card('ציוד נוסף', t);
+  let ct = '<p class="muted" style="margin-bottom:8px">דברים שסופרים בכל פרויקט ידנית, ופריטים יכולים להיות מחושבים לפיהם. למשל "נקודות חשמל" או "ארונות תקשורת".</p>';
+  if (cat.counters.length){ ct += '<div class="tblw"><table class="tbl"><thead><tr><th>שם המונה</th><th></th></tr></thead><tbody>';
+    cat.counters.forEach((m,i) => { ct += '<tr><td><input type="text" data-b="counters.'+i+'.name" data-re-blur></td><td><button class="danger" data-del="counters.'+i+'" aria-label="מחק מונה">✕</button></td></tr>'; });
+    ct += '</tbody></table></div>'; }
+  ct += '<div class="btns"><button data-add="counters">הוסף מונה</button></div>';
+  h += card('מונים לפרויקט', ct);
   h += card('קריאות שירות', '<div class="frm">'+fld('מחיר שעת שירות ללקוח, לפני מע״מ (₪)','service.hourly','number')+fld('דמי ביקור, לפני מע״מ (₪)','service.callout','number')+'</div>');
   h += card('עבודה וזמני התקנה', '<div class="frm">'+fld('עלות שעת עבודה לעובד (₪)','labor.hourly','number')+fld('מספר עובדים','labor.workers','number')+fld('שעות עבודה ביום','labor.hpd','number')+
     fld('דקות להתקנת מצלמה','labor.minCam','number')+fld('דקות למטר כבל','labor.minCableM','number')+fld('דקות למטר צינור','labor.minConduitM','number')+fld('שעות למקליט והגדרות','labor.setupH','number')+'</div>');
@@ -1788,11 +1832,12 @@ function renderCatalog(pg){
     '<div class="btns"><button id="kApply">החל את אחוזי הרווח על הפרויקט הנוכחי</button></div>');
   h += '</div>';
   pg.innerHTML = h;
-  bindAll(pg, () => cat, () => saveCat());
+  bindAll(pg, () => cat, el => { saveCat(); if ('re' in el.dataset) renderCatalog(pg); });
+  pg.querySelectorAll('[data-re-blur]').forEach(el => el.addEventListener('change', () => renderCatalog(pg)));
   renderSumitBox();
   pg.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { const [k,i] = b.dataset.del.split('.'); cat[k].splice(+i,1); saveCat(); renderCatalog(pg); }));
   pg.querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', () => { const k = b.dataset.add;
-    cat[k].push(k === 'cameras' ? {id:uid('c'), brand:'', model:'', lens:'', res:'', kind:'', fov:90, range:10, cost:0} : k === 'conduits' ? {id:uid('d'), name:'', cost:0} : {id:uid('i'), name:'', unit:'יח׳', cost:0, auto:''});
+    cat[k].push(k === 'cameras' ? {id:uid('c'), brand:'', model:'', lens:'', res:'', kind:'', fov:90, range:10, cost:0} : k === 'conduits' ? {id:uid('d'), name:'', cost:0} : k === 'counters' ? {id:uid('n'), name:''} : {id:uid('i'), name:'', unit:'יח׳', cost:0, base:'', per:1});
     saveCat(); renderCatalog(pg); }));
   $('#kApply').addEventListener('click', () => { state.pricing.profitEq = +cat.defaults.profitEq||0; state.pricing.profitLab = +cat.defaults.profitLab||0; save(); pgMsg('אחוזי הרווח עודכנו בפרויקט "'+esc(state.name)+'".'); });
   $('#kExport').addEventListener('click', () => showText(JSON.stringify(cat), 'המחירון הועתק. שמור אותו בקובץ טקסט כגיבוי.', '#pgMsg'));
@@ -2906,7 +2951,7 @@ async function makeServiceReport(t){
 }
 
 /* ---------- navigation chrome & mobile tables ---------- */
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.6.0';
 document.querySelectorAll('.appver').forEach(e => { e.textContent = APP_VERSION; });
 function labelTables(root){
   (root || document).querySelectorAll('table.tbl').forEach(tb => {
