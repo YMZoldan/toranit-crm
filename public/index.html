@@ -770,6 +770,7 @@ function renderPanel(){
       '<div class="row"><span>שם</span><input type="text" id="cName" value="'+esc(c.name)+'"></div>'+
       '<div class="row"><span>סוג</span><select id="cType">'+Object.keys(TYPES).map(k => '<option value="'+k+'"'+(c.type===k?' selected':'')+'>'+TYPES[k]+'</option>').join('')+'</select><input type="color" id="cColor" value="'+c.color+'" aria-label="צבע"></div>'+
       '<div class="row"><span>מצלמה</span><select id="cCam" style="max-width:190px"><option value="">'+(NET[c.type] ? 'נקודת רשת (בלי מצלמה)' : 'ללא מצלמה')+'</option>'+cat.cameras.map(m => '<option value="'+m.id+'"'+(c.cam===m.id?' selected':'')+'>'+esc(camLabel(m)||'ללא שם')+'</option>').join('')+'</select></div>'+
+      '<div class="row"><span></span><button class="sm" id="cPick">בחר מצלמה ממחירון ספק</button></div>'+
       (c.cam ? '<div class="row"><span>כיוון צילום</span><span class="rng"><input type="range" id="cDir" min="0" max="355" step="5" value="'+(+c.dir||0)+'"><span class="num" id="vDir">'+(+c.dir||0)+'°</span></span></div>' : '')+
       '<div class="row"><span>צינור או תעלה</span><select id="cCond" style="max-width:190px"><option value="">ללא</option>'+cat.conduits.map(m => '<option value="'+m.id+'"'+(c.conduit===m.id?' selected':'')+'>'+esc(m.name||'ללא שם')+'</option>').join('')+'</select></div>'+
       (c.conduit ? '<div class="row"><span>אורך צינור (מ׳)</span><span><input type="number" id="cCondLen" min="0" step="0.5" value="'+fmt(c.conduitLen)+'"> <button id="cCondAll">כל האורך</button></span></div>' : '')+
@@ -793,6 +794,7 @@ function renderPanel(){
     $('#cColor').addEventListener('change', e => { snapshot(); c.color = e.target.value; save(); render(); renderList(); });
     $('#cExtra').addEventListener('change', e => { snapshot(); c.extra = Math.max(0, +e.target.value || 0); save(); render(); upd(); renderList(); renderSummary(); });
     $('#cCam').addEventListener('change', e => { snapshot(); c.cam = e.target.value || null; commit(); });
+    $('#cPick').addEventListener('click', () => openCamPicker({cableIds:[c.id]}));
     if ($('#cDir')){ let dirSnap = false;
       $('#cDir').addEventListener('input', e => { if (!dirSnap){ snapshot(); dirSnap = true; } c.dir = +e.target.value; $('#vDir').textContent = c.dir + '°'; render(); });
       $('#cDir').addEventListener('change', save); }
@@ -1546,7 +1548,8 @@ const numf = v => (Math.round((+v||0)*100)/100).toLocaleString('en-US', {maximum
 const r2 = v => Math.round((+v||0)*100)/100;
 const camById = id => cat.cameras.find(c => c.id === id);
 const condById = id => cat.conduits.find(c => c.id === id);
-const camLabel = m => m ? [m.brand, m.model, m.lens, m.res].filter(Boolean).join(' ') : '';
+const camLabel = m => { if (!m) return ''; const md = String(m.model || ''), low = md.toLowerCase(), has = v => v && low.includes(String(v).toLowerCase());
+  return [has(m.brand) ? '' : m.brand, md, has(m.lens) ? '' : m.lens, has(m.res) ? '' : m.res].filter(Boolean).join(' '); };
 function autoBases(){
   const b = [['', 'ידני (מקלידים כמות בכל פרויקט)'], ['proj', 'לפרויקט'], ['cams', 'מצלמות'], ['netPoints', 'נקודות רשת (כבל רשת בלי מצלמה)'],
     ['netCables', 'כבלי רשת (מצלמות + נקודות)'], ['coax', 'כבלי קואקס'], ['power', 'כבלי חשמל'], ['cables', 'כל הכבלים'], ['meters', 'מטר כבל, כל הסוגים']];
@@ -1570,6 +1573,7 @@ function autoCtx(p){
 }
 function ruleLabel(it){
   if (!it.base) return 'ידני';
+  if (it.base.startsWith('camset:')){ const n = it.base.slice(7).split(',').filter(Boolean).map(id => camById(id)).filter(Boolean); return (+it.per !== 1 ? numf(it.per) + ' × ' : '') + 'מצלמות מדגם ' + (n.length === 1 ? (n[0].sku || camLabel(n[0])) : n.length + ' דגמים'); }
   const b = autoBases().find(x => x[0] === it.base);
   const per = +it.per;
   return (per !== 1 ? numf(per) + ' × ' : '') + (b ? b[1].replace(/ \(.*\)$/, '') : 'בסיס שנמחק');
@@ -1619,7 +1623,11 @@ function setView(v){
 function renderPage(){ const pg = $('#page'); if (viewMode === 'service') renderService(pg); else if (viewMode === 'billing') renderBilling(pg); else if (viewMode === 'customers') renderCustomers(pg); else if (viewMode === 'dash') renderDash(pg); else if (viewMode === 'price') renderPricing(pg); else if (viewMode === 'track') renderTrack(pg); else if (viewMode === 'catalog') renderCatalog(pg); }
 
 /* ---------- pricing calculation ---------- */
-function autoQty(it, ctx){ if (!it.base) return 0; return Math.max(0, Math.ceil((+ctx[it.base] || 0) * (+it.per || 0) - 1e-9)); }
+function autoQty(it, ctx){
+  if (!it.base) return 0;
+  const v = it.base.startsWith('camset:') ? it.base.slice(7).split(',').reduce((a, id) => a + (+ctx['cam:' + id] || 0), 0) : (+ctx[it.base] || 0);
+  return Math.max(0, Math.ceil(v * (+it.per || 0) - 1e-9));
+}
 function calc(){
   const s = state, pr = s.pricing, w = (+s.settings.waste || 0)/100, L = cat.labor, lines = [];
   const camCount = {}; let cams = 0, netCables = 0;
@@ -1667,13 +1675,13 @@ function renderPricing(pg){
     t = '<div class="tblw"><table class="tbl"><thead><tr><th>#</th><th>שם</th><th>דגם מצלמה</th><th>סוג כבל</th><th>אורך כבל</th><th>צינור או תעלה</th><th>אורך צינור (מ׳)</th></tr></thead><tbody>';
     s.cables.forEach((c,i) => {
       t += '<tr><td>'+(i+1)+'</td><td><input type="text" data-b="cables.'+i+'.name"></td>'+
-        '<td><select data-b="cables.'+i+'.cam">'+opt(cat.cameras, c.cam, NET[c.type] ? 'נקודת רשת (בלי מצלמה)' : 'ללא מצלמה', m => camLabel(m)||'ללא שם')+'</select></td>'+
+        '<td style="white-space:nowrap"><select data-b="cables.'+i+'.cam" data-re>'+opt(cat.cameras, c.cam, NET[c.type] ? 'נקודת רשת (בלי מצלמה)' : 'ללא מצלמה', m => camLabel(m)||'ללא שם')+'</select> <button class="sm" data-pkrow="'+c.id+'" title="בחר מצלמה ממחירון ספק">מהמחירון</button></td>'+
         '<td><select data-b="cables.'+i+'.type" data-re>'+Object.keys(TYPES).map(k => '<option value="'+k+'"'+(k===c.type?' selected':'')+'>'+TYPES[k]+'</option>').join('')+'</select></td>'+
         '<td class="n">'+fmt(cableTotal(c))+' m</td>'+
         '<td><select data-b="cables.'+i+'.conduit" data-re>'+opt(cat.conduits, c.conduit, 'ללא', m => m.name||'ללא שם')+'</select></td>'+
         '<td>'+(c.conduit ? '<input type="number" min="0" step="0.5" data-num data-b="cables.'+i+'.conduitLen">' : '<span class="muted">—</span>')+'</td></tr>';
     });
-    t += '</tbody></table></div>';
+    t += '</tbody></table></div><div class="btns"><button id="pkOpen" class="primary">בחר מצלמה ממחירון ספק</button></div>';
   }
   h += card('מצלמות וכבלים', t);
   t = '<p class="muted">השאר כמות ריקה לחישוב אוטומטי, או הקלד מספר כדי לקבוע כמות ידנית.</p><div class="tblw"><table class="tbl"><thead><tr><th>פריט</th><th>חישוב אוטומטי</th><th>כמות</th><th>עלות ליחידה</th></tr></thead><tbody>';
@@ -1701,6 +1709,8 @@ function renderPricing(pg){
     if ('re' in el.dataset) renderPricing(pg); else renderCalc();
   });
   pg.querySelectorAll('[data-cnt]').forEach(inp => inp.addEventListener('change', () => { state.counters = state.counters || {}; state.counters[inp.dataset.cnt] = Math.max(0, +inp.value || 0); save(); renderPricing(pg); }));
+  pg.querySelectorAll('[data-pkrow]').forEach(b => b.addEventListener('click', () => openCamPicker({cableIds:[+b.dataset.pkrow]})));
+  if ($('#pkOpen')) $('#pkOpen').addEventListener('click', () => openCamPicker({cableIds:state.cables.filter(c => (NET[c.type] || c.type === 'coax') && c.cam && isPlaceholderCam(camById(c.cam))).map(c => c.id)}));
   $('#addCustom').addEventListener('click', () => { state.custom.push({id:uid('u'), name:'', qty:1, unit:'יח׳', cost:0}); save(); renderPricing(pg); });
   pg.querySelectorAll('[data-delc]').forEach(b => b.addEventListener('click', () => { state.custom.splice(+b.dataset.delc, 1); save(); renderPricing(pg); }));
   $('#gQuote').addEventListener('click', runJob($('#gQuote'), makeQuote));
@@ -1800,6 +1810,7 @@ function renderTrack(pg){
 function renderCatalog(pg){
   let h = '<div class="pg"><div class="pghead"><div><h2 style="margin:0">מחירון והגדרות</h2><p class="muted">משותף לכל הפרויקטים. כל המחירים הם העלות שלך, לפני מע״מ.</p></div>'+
     '<div class="btns" style="margin:0"><button id="kExport">העתק מחירון לגיבוי</button><label class="chk" style="font-size:13.5px">טען מחירון <input type="file" id="kImport" accept=".json,application/json,text/plain"></label></div></div><div id="pgMsg"></div>';
+  h += card('מחירוני ספקים', '<div id="plBox"></div>');
   h += card('חיבור לסאמיט', '<div id="suBox"></div>');
   h += card('פרטי העסק להצעות מחיר', '<div class="frm">'+fld('שם העסק','company.name')+fld('טלפון','company.phone')+fld('אימייל','company.email')+fld('כתובת','company.address')+fld('ח.פ / ע.מ','company.vatId')+'</div>'+
     '<label class="lblk">תנאים שיופיעו בכל הצעה<textarea data-b="company.terms" rows="5"></textarea></label>');
@@ -1815,7 +1826,7 @@ function renderCatalog(pg){
   h += card('כבלים וצנרת', t);
   t = '<div class="tblw"><table class="tbl"><thead><tr><th>פריט</th><th>יחידה</th><th>עלות (₪)</th><th>כמות אוטומטית: מספר × לכל</th><th></th></tr></thead><tbody>';
   cat.items.forEach((m,i) => { t += '<tr><td><input type="text" data-b="items.'+i+'.name"></td><td><input type="text" data-b="items.'+i+'.unit" style="min-width:60px;width:70px"></td><td><input type="number" min="0" step="any" data-num data-b="items.'+i+'.cost"></td>'+
-    '<td style="white-space:nowrap"><input type="number" min="0" step="any" data-num data-b="items.'+i+'.per" style="width:62px"'+(m.base ? '' : ' disabled')+'> × <select data-b="items.'+i+'.base" data-re style="max-width:240px">'+autoBases().map(b => '<option value="'+esc(b[0])+'">'+esc(b[1])+'</option>').join('')+'</select></td><td><button class="danger" data-del="items.'+i+'" aria-label="מחק פריט">✕</button></td></tr>'; });
+    '<td style="white-space:nowrap"><input type="number" min="0" step="any" data-num data-b="items.'+i+'.per" style="width:62px"'+(m.base ? '' : ' disabled')+'> × <select data-b="items.'+i+'.base" data-re style="max-width:240px">'+(m.base && m.base.startsWith('camset:') ? [[m.base, ruleLabel(Object.assign({}, m, {per:1}))]] : []).concat(autoBases()).map(b => '<option value="'+esc(b[0])+'">'+esc(b[1])+'</option>').join('')+'</select></td><td><button class="danger" data-del="items.'+i+'" aria-label="מחק פריט">✕</button></td></tr>'; });
   t += '</tbody></table></div><div class="btns"><button data-add="items">הוסף פריט</button></div>'+
     '<p class="muted" style="margin-top:8px">דוגמאות: מחבר RJ45 = 2 × כבלי רשת. שקע רשת = 1 × נקודות רשת. זרוע קיר = 1 × מצלמות מדגם צינור. מספר עשרוני מעוגל למעלה, למשל 0.25 × מצלמות לקופסת חיבור לכל 4 מצלמות.</p>';
   h += card('ציוד נוסף', t);
@@ -1834,7 +1845,7 @@ function renderCatalog(pg){
   pg.innerHTML = h;
   bindAll(pg, () => cat, el => { saveCat(); if ('re' in el.dataset) renderCatalog(pg); });
   pg.querySelectorAll('[data-re-blur]').forEach(el => el.addEventListener('change', () => renderCatalog(pg)));
-  renderSumitBox();
+  renderSumitBox(); renderPlBox();
   pg.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { const [k,i] = b.dataset.del.split('.'); cat[k].splice(+i,1); saveCat(); renderCatalog(pg); }));
   pg.querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', () => { const k = b.dataset.add;
     cat[k].push(k === 'cameras' ? {id:uid('c'), brand:'', model:'', lens:'', res:'', kind:'', fov:90, range:10, cost:0} : k === 'conduits' ? {id:uid('d'), name:'', cost:0} : k === 'counters' ? {id:uid('n'), name:''} : {id:uid('i'), name:'', unit:'יח׳', cost:0, base:'', per:1});
@@ -2950,8 +2961,440 @@ async function makeServiceReport(t){
   await saveFile('דוח שירות ' + t.number + ' ' + fname(c.name || '') + '.pdf', await d.pdf());
 }
 
+/* ---------- supplier price lists, camera picker, junction boxes ---------- */
+const MAMMOTH_URL = 'https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js';
+const PLCAT = {camera:'מצלמה', jbox:'קופסת הגבהה', bracket:'זרוע / תושבת', nvr:'מקליט', switch:'מתג', hdd:'דיסק', cable:'כבל', other:'אחר'};
+const KINDS = {dome:'כיפה', bullet:'צינור', turret:'טורט', ptz:'ממונעת PTZ', fisheye:'פנורמית / 360°', covert:'נסתרת / מוסלקת', other:'אחר'};
+const LENST = {fixed:'עדשה קבועה', vf:'עדשה משתנה', motor:'משתנה חשמלית'};
+const BRANDS = [['Provision',/provision|פרוויז/i],['Hikvision',/hikvision|היקוויז|\bDS-2C|\bDS-7\d/i],['Dahua',/dahua|דאהו|\bDH-IPC|IPC-H[DF]W|IPC-PDW/i],['Uniview',/uniview|\bUNV\b|יוניוויו|\bIPC[23]\d{3}/i],
+  ['Axis',/\baxis\b|אקסיס/i],['Hanwha',/hanwha|wisenet/i],['Ezviz',/ezviz/i],['Imou',/\bimou\b/i],['Tiandy',/tiandy/i],['Milesight',/milesight/i],['Reolink',/reolink/i],['TP-Link',/tp-?link|\bvigi\b/i],['Ubiquiti',/ubiquiti|unifi/i],['Avtech',/avtech/i],['Edimax',/edimax/i]];
+let priceLists = null, plImport = null;
+const plColRef = () => cloud.root.collection('pricelists');
+const pliColRef = () => cloud.root.collection('plitems');
+const isPlaceholderCam = m => !m || (!m.sku && !(+m.cost > 0));
+async function loadPriceLists(force){
+  if (priceLists && !force) return priceLists;
+  const out = {lists:{}, items:{}};
+  if (cloud){
+    const [a, b] = await Promise.all([plColRef().get(), pliColRef().get()]);
+    a.docs.forEach(d => { out.lists[d.id] = clone(d.data()); });
+    b.docs.forEach(d => { const x = d.data(); if (!out.lists[x.listId]) return; (out.items[x.listId] = out.items[x.listId] || []).push([x.n || 0, x.items || []]); });
+    Object.keys(out.items).forEach(k => { out.items[k] = out.items[k].sort((p,q) => p[0] - q[0]).flatMap(p => clone(p[1])); });
+  } else { try { const r = JSON.parse(lsGet('tcp2-pricelists') || 'null'); if (r && r.lists) Object.assign(out, r); } catch(e) {} }
+  priceLists = out; return out;
+}
+function chunkItems(items){
+  const out = []; let cur = [], size = 0;
+  items.forEach(x => { const s = JSON.stringify(x).length * 2; if (cur.length && size + s > 150000){ out.push(cur); cur = []; size = 0; } cur.push(x); size += s; });
+  if (cur.length) out.push(cur); return out;
+}
+async function savePriceList(meta, items){
+  await loadPriceLists();
+  if (cloud){
+    const old = priceLists.lists[meta.id], chunks = chunkItems(items);
+    for (let i=0;i<chunks.length;i++) await pliColRef().doc(meta.id + '_' + i).set({listId:meta.id, n:i, items:chunks[i]});
+    if (old && old.chunks > chunks.length) for (let i=chunks.length;i<old.chunks;i++) await pliColRef().doc(meta.id + '_' + i).delete();
+    meta.chunks = chunks.length; await plColRef().doc(meta.id).set(meta);
+  }
+  priceLists.lists[meta.id] = meta; priceLists.items[meta.id] = items;
+  if (!cloud && !lsSet('tcp2-pricelists', JSON.stringify(priceLists))) throw new Error('אין מספיק מקום בדפדפן למחירון הזה. בשרת אין מגבלה כזו.');
+}
+async function deletePriceList(id){
+  await loadPriceLists(); const m = priceLists.lists[id];
+  if (cloud && m){ for (let i=0;i<(m.chunks || 0);i++) await pliColRef().doc(id + '_' + i).delete(); await plColRef().doc(id).delete(); }
+  delete priceLists.lists[id]; delete priceLists.items[id];
+  if (!cloud) lsSet('tcp2-pricelists', JSON.stringify(priceLists));
+}
+const allPlItems = () => Object.keys(priceLists.items).flatMap(id => (priceLists.items[id] || []).map(x => Object.assign({list:id, sup:(priceLists.lists[id] || {}).supplier || ''}, x)));
+
+/* classification */
+function kindsIn(t){ const out = []; [['ptz',/ptz|ממונעת|speed\s*dome/i],['fisheye',/fish\s*eye|fisheye|360|פנורמ|עין דג/i],['covert',/מוסלק|נסתרת|פינהול|pinhole|covert/i],['turret',/turret|טורט|eyeball/i],['bullet',/bullet|צינור|צילינדר/i],['dome',/\bdome\b|כיפה|כיפת|כיפות/i]].forEach(([k, re]) => { if (re.test(t)) out.push(k); }); return out; }
+function plKind(t){ return kindsIn(t)[0] || ''; }
+function plBrand(t){ const b = BRANDS.find(x => x[1].test(t)); return b ? b[0] : ''; }
+function plRes(t){ if (/\b4k\b/i.test(t)) return 8; if (/\b3k\b/i.test(t)) return 5; const m = /(\d{1,2}(?:\.\d)?)\s*(?:mp|מגה|megapixel)/i.exec(t); return m ? +m[1] : null; }
+function plLens(t){ const m = /(\d{1,3}(?:\.\d{1,2})?)\s*(?:-\s*\d{1,3}(?:\.\d{1,2})?\s*)?(?:mm|מ["״]?מ)/i.exec(t); return m ? +m[1] : null; }
+function plFov(t){ const a = [...String(t).matchAll(/(\d{2,3}(?:\.\d)?)\s*°/g)].map(m => +m[1]).filter(v => v >= 10 && v <= 360); return a.length ? Math.max(...a) : null; }
+function plLensType(t){ return /חשמלית|motori[sz]ed|\bmvf\b/i.test(t) ? 'motor' : /משתנה|varifocal|\bvf\b|\d\s*-\s*\d+(?:\.\d+)?\s*mm/i.test(t) ? 'vf' : /קבועה|fixed/i.test(t) ? 'fixed' : ''; }
+function plCategory(t, sheet){
+  const s = String(sheet || '');
+  if (/bracket|זרוע|תושב|pole\s*mount|wall\s*mount|corner\s*mount|מוט הארכה/i.test(t) && !/junction|ג[׳'"]?נקשן|קופס|\bbox\b/i.test(t)) return 'bracket';
+  if (/junction|ג[׳'"]?נקשן|קופס[תא]+\s*(?:ה?חיבור|חיבורים|הגבה|הגבהה|הסתרה|התקנה)|mount(?:ing)?\s*box|back\s*box|deep\s*base|\bJB\b|-?\d{3,4}ZJ|PFA1\d\d|TR-JB/i.test(t)) return 'jbox';
+  if (/\bNVR\b|\bDVR\b|\bXVR\b|מקליט/i.test(t) || /^(N|D)VR$/i.test(s.trim())) return 'nvr';
+  if (/switch|מתג|סוויץ/i.test(t) || /switch/i.test(s)) return 'switch';
+  if (/\bHDD\b|דיסק|hard\s*disk|hard\s*drive|purple|skyhawk/i.test(t)) return 'hdd';
+  if (/\bcat\s*-?\s*(5e|6a?)\b|כבל|cable|utp|ftp|coax|rg-?59/i.test(t)) return 'cable';
+  if (/אינטרקום|intercom|דורבל|doorbell|מצלמת דרך|dash\s*cam|מתאם|adapter|ספק כוח|power\s*supply|מפצל|splitter|injector|אינג׳?קטור|רשיון|license|אל.?פסק|\bUPS\b/i.test(t)) return 'other';
+  if (kindsIn(t).length || /camera|מצלמ|\bIPC\b|DS-2CD|DS-2DE|IPC-H|\bcam\b/i.test(t)) return 'camera';
+  return 'other';
+}
+function lensFov(l){ if (!l) return 90; return l <= 2.2 ? 115 : l <= 2.9 ? 100 : l <= 3.7 ? 88 : l <= 4.2 ? 84 : l <= 6.2 ? 54 : l <= 8.5 ? 40 : l <= 12.5 ? 28 : 20; }
+function lensRange(l){ return l ? Math.round(Math.min(60, Math.max(8, l*4.5))) : 12; }
+function parseNum(s){
+  let t = String(s == null ? '' : s).replace(/[₪$€]|nis|ש["״]?ח|usd|eur/gi, '').replace(/\s/g, '');
+  if (!/\d/.test(t)) return null;
+  if (/^\d{1,3}(\.\d{3})+(,\d{1,2})?$/.test(t)) t = t.replace(/\./g, '').replace(',', '.'); else t = t.replace(/,/g, '');
+  if (!/^-?\d+(\.\d+)?$/.test(t)) return null;
+  return +t;
+}
+const isModel = v => /[A-Za-z]/.test(v) && /\d/.test(v) && /^[A-Za-z0-9][A-Za-z0-9 ()+./_-]{2,40}$/.test(String(v).trim()) && !/^\d+(mm|mp|m)$/i.test(String(v).trim());
+const SKU_RE = /\b(?=[A-Z0-9./()-]*\d)(?=[A-Z0-9./()-]*[A-Z])[A-Z0-9][A-Z0-9()]*(?:[-./][A-Z0-9()]+)+\b|\b(?=\w*\d)(?=\w*[A-Z])[A-Z0-9]{6,}\b/i;
+const HDR = [
+  ['model', /^(דגם|model|part\s*(no|number)?)$|^דגם\b/i], ['code', /מק["״׳']?ט|מקט|^sku$|catalog|קוד/i],
+  ['ir', /טווח תאורה|טווח הארה|^IR\b|illuminat/i],
+  ['name', /^(תיאור|תאור)|description|^שם|^product|^מוצר$|^פריט$|^desc/i], ['price', /^מחיר|price|עלות|^cost|נטו|^net$/i],
+  ['brand', /יצרן|brand|manufacturer|מותג|vendor/i], ['series', /^סדרה|series/i], ['res', /רזולוציה|resolution/i],
+  ['kind', /סוג המצלמה|camera\s*type|סוג מצלמה/i], ['lensType', /סוג עדשה|lens\s*type/i], ['lens', /מפתח עדשה|^עדשה$|^lens$|focal/i],
+  ['ip', /אטימות|waterproof|\bIP\s*rating/i], ['jb', /קופסת הגבהה|קופסת חיבורים|junction/i],
+  ['cat', /^קטגוריה|category|^קבוצה/i]];
+function headerMap(r){
+  const map = {}; let hits = 0;
+  r.forEach((c, k) => { const v = String(c || '').replace(/\s+/g, ' ').trim(); if (!v || v.length > 40) return;
+    const f = HDR.find(([key, re]) => map[key] == null && re.test(v)); if (f){ map[f[0]] = k; hits++; } });
+  const ok = map.price != null ? hits >= 2 && (map.model != null || map.code != null || map.name != null) : (hits >= 4 && (map.model != null || map.code != null));
+  return ok ? map : null;
+}
+function headerOf(r, k){ return String(r[k] || '').replace(/\s+/g, ' ').trim(); }
+function cleanCell(v){ return String(v || '').replace(/\s*\n\s*/g, ' · ').replace(/\s+/g, ' ').trim(); }
+function rowsToItems(rows, sheet, forced){
+  const items = []; let map = null, hdrRow = null, ctx = '';
+  const sheetTxt = String(sheet || '');
+  for (let i=0;i<rows.length;i++){
+    const r = rows[i], filled = r.filter(c => String(c || '').trim());
+    if (!filled.length) continue;
+    const hm = forced && forced.row === i ? forced.map : headerMap(r);
+    if (hm){ map = hm; hdrRow = r; continue; }
+    if (filled.length <= 2 && !filled.some(c => parseNum(c) != null && String(c).length < 8) && !filled.some(isModel)){ ctx = filled.join(' '); continue; }
+    let model = '', code = '', name = '', price = null, priceTxt = '', brand = '';
+    const specs = [], get = k => map && map[k] != null ? String(r[map[k]] || '').trim() : '';
+    if (map){
+      priceTxt = get('price'); price = parseNum(priceTxt);
+      if (price == null && map.price != null){ for (const d of [1, -1, 2]){ const v = parseNum(r[map.price + d]); if (v != null && v > 0 && v < 200000 && !/\n/.test(String(r[map.price + d] || ''))){ price = v; break; } } }
+      model = get('model'); code = get('code'); name = get('name'); brand = get('brand');
+      if (model && !isModel(model)){ const alt = r.find(isModel); if (alt) model = String(alt).trim(); }
+      if (!model && isModel(code.split(/\s|\n/)[0])) { model = code.split(/\s|\n/)[0]; code = ''; }
+      if (!model){ const alt = r.find(isModel); if (alt) model = String(alt).trim(); }
+      if (map.name != null && name.length < 6){ for (const d of [1, -1]){ const v = String(r[map.name + d] || '').trim(); if (v.length > Math.max(8, name.length + 4) && parseNum(v) == null && !isModel(v)){ name = v; break; } } }
+      r.forEach((c, k) => { const v = cleanCell(c); const h = headerOf(hdrRow, k);
+        if (!v || !h || [map.price, map.model, map.code, map.name].includes(k) || parseNum(v) != null && /מחיר|price/i.test(h)) return;
+        if (/^[A-Z]$/.test(h)) return;
+        specs.push([h.slice(0, 30), v.slice(0, 160)]); });
+    } else {
+      const nums = r.map((c, k) => [k, parseNum(c)]).filter(x => x[1] != null && x[1] > 0 && !SKU_RE.test(r[x[0]]) && String(r[x[0]]).length < 12);
+      if (!nums.length) continue;
+      price = nums[nums.length - 1][1];
+      const txt = r.filter((c, k) => c && !nums.some(n => n[0] === k)).map(cleanCell).join(' ');
+      const m = SKU_RE.exec(txt); model = m ? m[0] : ''; name = txt.replace(model, '').replace(/\s+/g, ' ').trim();
+    }
+    code = String(code || '').split(/\n/)[0].replace(/[^\dA-Za-z-]/g, '');
+    const carton = (/כמות בקרטון\D*(\d+)/.exec(r.join(' ')) || [])[1] || '';
+    const noPrice = !(price > 0);
+    if (noPrice && !/שאל|פנה|לפי פני/i.test(priceTxt)) continue;
+    if (price > 1e6 || (!model && !name) || (!noPrice && price < 5)) continue;
+    const S = k => cleanCell(get(k));
+    const kindTxt = S('kind'), lensTxt = S('lens'), resTxt = S('res'), lensTypeTxt = S('lensType'), irTxt = S('ir');
+    const all = [model, name, kindTxt, resTxt, lensTxt, lensTypeTxt, S('series'), S('cat'), brand, ctx, sheetTxt].join(' ');
+    const kindCat = kindTxt ? plCategory(kindTxt, '') : '';
+    const cat = /אינטרקום|intercom/i.test(sheetTxt + ' ' + kindTxt) ? (kindCat === 'jbox' ? 'jbox' : 'other')
+      : kindCat && kindCat !== 'other' && kindCat !== 'cable' ? kindCat
+      : kindTxt && kindsIn(kindTxt).length ? 'camera'
+      : plCategory([model, name, S('cat'), ctx].join(' '), sheetTxt);
+    const k = kindsIn(kindTxt || all)[0] || '';
+    const tech = /\bAHD\b|\bTVI\b|\bCVI\b|analog|אנלוג/i.test(sheetTxt + ' ' + S('series')) || /^AHD$/i.test(sheetTxt.trim()) ? 'AHD' : (cat === 'camera' ? 'IP' : '');
+    const disp = cleanCell(name) || (cat === 'camera' ? [kindTxt ? 'מצלמת ' + kindTxt.split(/[ ·]/)[0] : 'מצלמה', resTxt, plLens(lensTxt) ? plLens(lensTxt) + 'mm' : '', S('series')].filter(Boolean).join(' ') : kindTxt || S('cat') || '');
+    const jb = (S('jb').match(/[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+/gi) || []).slice(0, 6);
+    items.push({s:model.slice(0, 60), code:code.slice(0, 20), n:(disp || model).slice(0, 200), p:noPrice ? 0 : price, np:noPrice ? 1 : 0, b:brand, c:cat, k, t:tech,
+      r:plRes(resTxt || all), rt:resTxt.slice(0, 20), l:plLens(lensTxt || all), lt:plLensType(lensTypeTxt + ' ' + lensTxt), lx:lensTxt.slice(0, 60),
+      fov:plFov(lensTxt), ir:parseNum((/(\d+)\s*M\b/i.exec(irTxt) || [])[1]), ser:S('series').slice(0, 30), jb, ca:carton, d:specs.slice(0, 16)});
+  }
+  return items;
+}
+
+/* reading any file into rows (arrays of cells) */
+async function fileRows(file){
+  const name = file.name.toLowerCase(), buf = await file.arrayBuffer();
+  if (/\.(xlsx|xlsm|xlsb|xls|ods)$/.test(name)){
+    if (!window.XLSX) await loadScript(XLSX_URL);
+    const wb = window.XLSX.read(new Uint8Array(buf), {type:'array'}), out = [];
+    wb.SheetNames.forEach(sn => { const r = window.XLSX.utils.sheet_to_json(wb.Sheets[sn], {header:1, raw:false, defval:''}); out.push({sheet:sn, rows:r.map(x => x.map(v => String(v == null ? '' : v).trim()))}); });
+    return out;
+  }
+  if (/\.(csv|tsv)$/.test(name)) return [{sheet:'', rows:parseCsv(new TextDecoder('utf-8').decode(buf)).map(r => r.map(v => v.trim()))}];
+  if (/\.pdf$/.test(name)){
+    const lib = await ensurePdf();
+    const doc = await lib.getDocument({data:new Uint8Array(buf), isEvalSupported:false}).promise, rows = [];
+    for (let i=1;i<=doc.numPages;i++){
+      const tc = await (await doc.getPage(i)).getTextContent(), lines = [];
+      tc.items.forEach(it => { const s = String(it.str || '').trim(); if (!s) return; const x = it.transform[4], y = it.transform[5];
+        let L = lines.find(l => Math.abs(l.y - y) < 2.5); if (!L){ L = {y, parts:[]}; lines.push(L); } L.parts.push({x, s, w:it.width || 0}); });
+      lines.sort((a,b) => b.y - a.y).forEach(L => { L.parts.sort((a,b) => a.x - b.x); const cells = []; let cur = null;
+        L.parts.forEach(p => { if (cur && p.x - cur.x2 < 7){ cur.s += ' ' + p.s; cur.x2 = p.x + p.w; } else { cur = {s:p.s, x2:p.x + p.w}; cells.push(cur); } });
+        rows.push(cells.map(c => c.s)); });
+    }
+    return [{sheet:'', rows}];
+  }
+  if (/\.docx$/.test(name)){
+    if (!window.mammoth) await loadScript(MAMMOTH_URL);
+    const r = await window.mammoth.convertToHtml({arrayBuffer:buf});
+    const dd = new DOMParser().parseFromString(r.value, 'text/html'), out = [];
+    dd.querySelectorAll('table').forEach(tb => out.push({sheet:'', rows:[...tb.querySelectorAll('tr')].map(tr => [...tr.children].map(td => td.innerText !== undefined ? td.innerText.trim() : td.textContent.trim()))}));
+    if (!out.length) out.push({sheet:'', rows:[...dd.querySelectorAll('p,li')].map(p => [p.textContent.trim()])});
+    return out;
+  }
+  if (/\.(txt|text)$/.test(name)) return [{sheet:'', rows:new TextDecoder('utf-8').decode(buf).split(/\r?\n/).map(l => l.split(/\t| {2,}|;/).map(v => v.trim()))}];
+  if (/\.(png|jpe?g|gif|webp|heic|bmp|tiff?)$/.test(name)) throw new Error('תמונה של מחירון לא נקראת אוטומטית. בקש מהספק קובץ Excel או PDF, או שמור את המחירון כ־PDF.');
+  if (/\.doc$/.test(name)) throw new Error('קובץ Word ישן (doc) לא נתמך. פתח אותו ב־Word ושמור כ־docx או PDF.');
+  throw new Error('סוג הקובץ לא נתמך. אפשר Excel, CSV, PDF או Word (docx).');
+}
+
+/* import UI (inside the catalog page) */
+async function renderPlBox(){
+  const el = $('#plBox'); if (!el) return;
+  el.innerHTML = '<p class="muted">טוען...</p>';
+  try { await loadPriceLists(); } catch(e){ el.innerHTML = '<div class="warnbox">לא הצלחתי לטעון את המחירונים.</div>'; return; }
+  const ids = Object.keys(priceLists.lists).sort((a,b) => (priceLists.lists[b].created || 0) - (priceLists.lists[a].created || 0));
+  let h = '<p class="muted" style="margin-bottom:8px">העלה מחירון של ספק (Excel, CSV, PDF או Word). כל הגיליונות נקראים, כולל פרטי המפרט, והמוצרים יופיעו בבחירת מצלמה בתמחור ובתוכנית.</p>'+
+    '<div class="row" style="justify-content:flex-start"><input type="file" id="plFile" accept=".xlsx,.xlsm,.xlsb,.xls,.ods,.csv,.tsv,.pdf,.docx,.txt"></div><div id="plImp"></div>';
+  if (ids.length){
+    h += '<div class="tblw" style="margin-top:10px"><table class="tbl"><thead><tr><th>ספק</th><th>קובץ</th><th>מוצרים</th><th>מצלמות</th><th>קופסאות</th><th>עודכן</th><th></th></tr></thead><tbody>';
+    ids.forEach(id => { const m = priceLists.lists[id], it = priceLists.items[id] || [];
+      h += '<tr><td><b>'+esc(m.supplier || 'ללא שם')+'</b></td><td class="psub">'+esc(m.fileName || '')+'</td><td>'+it.length+'</td><td>'+it.filter(x => x.c === 'camera').length+'</td><td>'+it.filter(x => x.c === 'jbox').length+'</td>'+
+        '<td class="psub">'+tsDate(m.created)+'</td><td><button class="sm danger" data-pldel="'+id+'">'+(m._arm ? 'לחץ שוב' : 'מחק')+'</button></td></tr>'; });
+    h += '</tbody></table></div>';
+  }
+  el.innerHTML = h;
+  if (plImport) renderPlImport();
+  $('#plFile').addEventListener('change', async e => {
+    const f = e.target.files && e.target.files[0]; e.target.value = ''; if (!f) return;
+    $('#plImp').innerHTML = '<p class="muted" style="margin-top:8px">קורא את '+esc(f.name)+'...</p>';
+    try {
+      const sheets = await fileRows(f);
+      const allTxt = sheets.slice(0, 3).map(s => s.rows.slice(0, 40).map(r => r.join(' ')).join(' ')).join(' ');
+      plImport = {fileName:f.name, supplier:f.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim().slice(0, 60), sheets, vat:/כולל מע/i.test(allTxt) && !/אינו כולל|לא כולל/i.test(allTxt), disc:0, cur:/\bUSD\b|\$/.test(allTxt) && !/₪/.test(allTxt) ? 'USD' : 'ILS', rate:3.7, brand:plBrand(allTxt)};
+      renderPlImport();
+    } catch(err){ $('#plImp').innerHTML = '<div class="warnbox">'+esc(err.message || 'הקובץ לא נקרא.')+'</div>'; }
+  });
+  el.querySelectorAll('[data-pldel]').forEach(b => b.addEventListener('click', async () => {
+    const m = priceLists.lists[b.dataset.pldel];
+    if (!m._arm){ m._arm = true; renderPlBox(); setTimeout(() => { if (m._arm){ m._arm = false; renderPlBox(); } }, 3000); return; }
+    b.disabled = true; try { await deletePriceList(b.dataset.pldel); } catch(e) {} renderPlBox();
+  }));
+}
+function plImportItems(){
+  const I = plImport; let items = [];
+  I.sheets.forEach(sh => { items = items.concat(rowsToItems(sh.rows, sh.sheet, sh.forced)); });
+  const f = (I.vat ? 1/(1 + (+cat.defaults.vat || 0)/100) : 1) * (1 - (+I.disc || 0)/100) * (I.cur === 'ILS' ? 1 : (+I.rate || 1));
+  items.forEach(x => { x.p = r2(x.p * f); if (!x.b && I.brand) x.b = I.brand; });
+  const seen = new Set(); return items.filter(x => { const k = (x.s || x.n).toLowerCase() + '|' + x.p + '|' + x.c; if (seen.has(k)) return false; seen.add(k); return true; });
+}
+function renderPlImport(){
+  const el = $('#plImp'); if (!el || !plImport) return;
+  const I = plImport, items = plImportItems(), cnt = {};
+  items.forEach(x => { cnt[x.c] = (cnt[x.c] || 0) + 1; });
+  const np = items.filter(x => x.np).length;
+  let h = '<div class="card" style="margin-top:10px;background:var(--bg)"><h3>ייבוא '+esc(I.fileName)+'</h3><div class="frm">'+
+    '<label>שם הספק<input type="text" id="plSup" value="'+esc(I.supplier)+'"></label>'+
+    '<label>יצרן ברירת מחדל<input type="text" id="plBrand" value="'+esc(I.brand || '')+'" placeholder="למשל Provision"></label>'+
+    '<label>מטבע<select id="plCur"><option value="ILS">₪ שקל</option><option value="USD">$ דולר</option><option value="EUR">€ אירו</option></select></label>'+
+    (I.cur !== 'ILS' ? '<label>שער המרה לשקל<input type="number" step="any" id="plRate" value="'+I.rate+'"></label>' : '')+
+    '<label>הנחה שלך מהמחירון (%)<input type="number" step="any" id="plDisc" value="'+I.disc+'"></label></div>'+
+    '<label class="chk" style="margin-top:8px"><input type="checkbox" id="plVat"'+(I.vat ? ' checked' : '')+'> המחירים בקובץ כוללים מע״מ</label>';
+  h += '<p style="margin-top:10px"><b>'+items.length+' מוצרים</b> מ־'+I.sheets.filter(s => s.rows.length).length+' גיליונות <span class="muted">· '+Object.keys(PLCAT).filter(k => cnt[k]).map(k => PLCAT[k] + ': ' + cnt[k]).join(' · ')+(np ? ' · '+np+' בלי מחיר (לפי פנייה)' : '')+'</span></p>';
+  if (items.length){
+    const cams = items.filter(x => x.c === 'camera'), show = (cams.length ? cams : items).slice(0, 10);
+    h += '<div class="tblw"><table class="tbl"><thead><tr><th>דגם</th><th>תיאור</th><th>סוג</th><th>פרטים</th><th>עלות לפני מע״מ</th></tr></thead><tbody>'+
+      show.map(x => '<tr><td style="direction:ltr;text-align:right">'+esc(x.s)+'</td><td>'+esc(x.n)+'</td><td>'+PLCAT[x.c]+(x.t ? ' '+x.t : '')+'</td><td class="psub">'+esc(specLine(x))+'</td><td class="n">'+(x.np ? 'לפי פנייה' : money(x.p))+'</td></tr>').join('')+
+      '</tbody></table></div>'+(items.length > show.length ? '<p class="muted">ועוד '+(items.length - show.length)+'...</p>' : '');
+  } else {
+    const sh = I.sheets.find(s => s.rows.length) || I.sheets[0], hr = sh ? (sh.rows.find(r => r.filter(Boolean).length >= 2) || []) : [];
+    h += '<div class="warnbox">לא זוהו מוצרים עם מחיר. בחר את העמודות בגיליון הראשון:</div><div class="frm">' + [['model','דגם / מק״ט'],['name','תיאור'],['price','מחיר']].map(([f, lb]) =>
+      '<label>'+lb+'<select data-plmap="'+f+'"><option value="">לא קיים</option>'+hr.map((c, k) => '<option value="'+k+'">'+esc(c || ('עמודה ' + (k+1)))+'</option>').join('')+'</select></label>').join('') + '</div>';
+  }
+  h += '<div class="btns"><button class="primary" id="plSave"'+(items.length ? '' : ' disabled')+'>שמור מחירון</button><button id="plCancel">ביטול</button></div></div>';
+  el.innerHTML = h;
+  $('#plCur').value = I.cur;
+  $('#plSup').addEventListener('input', e => { I.supplier = e.target.value; });
+  $('#plBrand').addEventListener('change', e => { I.brand = e.target.value.trim(); renderPlImport(); });
+  $('#plCur').addEventListener('change', e => { I.cur = e.target.value; renderPlImport(); });
+  if ($('#plRate')) $('#plRate').addEventListener('change', e => { I.rate = +e.target.value || 1; renderPlImport(); });
+  $('#plDisc').addEventListener('change', e => { I.disc = +e.target.value || 0; renderPlImport(); });
+  $('#plVat').addEventListener('change', e => { I.vat = e.target.checked; renderPlImport(); });
+  el.querySelectorAll('[data-plmap]').forEach(s => s.addEventListener('change', () => {
+    const shx = I.sheets.find(q => q.rows.length) || I.sheets[0];
+    const row = shx.rows.findIndex(r => r.filter(Boolean).length >= 2);
+    shx.forced = shx.forced || {row, map:{}};
+    if (s.value === '') delete shx.forced.map[s.dataset.plmap]; else shx.forced.map[s.dataset.plmap] = +s.value;
+    renderPlImport();
+  }));
+  $('#plCancel').addEventListener('click', () => { plImport = null; el.innerHTML = ''; });
+  $('#plSave').addEventListener('click', async () => {
+    $('#plSave').disabled = true; $('#plSave').textContent = 'שומר...';
+    const sup = (I.supplier || '').trim() || 'ספק';
+    const existing = Object.values(priceLists.lists).find(m => (m.supplier || '').trim() === sup);
+    const meta = {id:existing ? existing.id : uid('pl'), supplier:sup, fileName:I.fileName, created:Date.now(), count:items.length};
+    try { await savePriceList(meta, items); plImport = null; renderPlBox(); pgMsg('המחירון של '+esc(sup)+' נשמר: '+items.length+' מוצרים'+(existing ? ' (החליף את הגרסה הקודמת)' : '')+'.'); }
+    catch(err){ $('#plSave').disabled = false; $('#plSave').textContent = 'שמור מחירון'; pgMsg(esc(err.message || 'השמירה נכשלה.'), true); }
+  });
+}
+function specLine(x){
+  return [x.b, x.t, x.k ? KINDS[x.k] : '', x.rt || (x.r ? x.r + 'MP' : ''), x.l ? x.l + 'mm' + (x.fov ? ' (' + x.fov + '°)' : '') : '', x.lt ? LENST[x.lt] : '', x.ir ? 'IR ' + x.ir + 'M' : '',
+    (x.d || []).filter(s => /אטימות/.test(s[0])).map(s => s[1])[0] || ''].filter(Boolean).join(' · ');
+}
+
+/* camera picker */
+let pick = null;
+async function openCamPicker(o){
+  pick = {q:'', kind:'', res:'', lt:'', tech:'', brand:'', sup:'', all:false, open:null, sel:new Set(o.cableIds || []), busy:true};
+  renderPicker();
+  try { await loadPriceLists(); } catch(e) {}
+  pick.busy = false; renderPicker();
+}
+function renderPicker(){
+  if (!pick){ closeModal2(); return; }
+  if (pick.busy){ openModal2('<p class="muted">טוען מחירונים...</p>'); return; }
+  const items = allPlItems();
+  if (!items.length){
+    const m = openModal2('<div class="pghead"><h2 style="margin:0">בחירת מצלמה מהמחירון</h2><button id="pkX" aria-label="סגור">✕</button></div><p>עדיין אין מחירוני ספקים. העלה מחירון במסך <b>מחירון והגדרות</b> ← "מחירוני ספקים".</p><div class="btns"><button class="primary" id="pkGo">למסך המחירון</button></div>');
+    m.querySelector('#pkX').addEventListener('click', () => { pick = null; closeModal2(); });
+    m.querySelector('#pkGo').addEventListener('click', () => { pick = null; closeModal2(); setView('catalog'); });
+    return;
+  }
+  const camsAll = items.filter(x => x.c === 'camera');
+  const brands = [...new Set(camsAll.filter(x => x.b).map(x => x.b))].sort(), sups = Object.values(priceLists.lists).map(m => [m.id, m.supplier]);
+  const techs = [...new Set(camsAll.map(x => x.t).filter(Boolean))];
+  const m = openModal2('<div class="pghead"><h2 style="margin:0">בחירת מצלמה מהמחירון</h2><button id="pkX" aria-label="סגור">✕</button></div>'+
+    '<div class="dfilter"><input type="text" id="pkQ" placeholder="חיפוש: דגם, 4MP, 2.8mm, ColorVu, IP67..." style="flex:1;min-width:220px">'+
+    '<select id="pkK"><option value="">כל הסוגים</option>'+Object.keys(KINDS).filter(k => camsAll.some(x => x.k === k)).map(k => '<option value="'+k+'">'+KINDS[k]+'</option>').join('')+'</select>'+
+    '<select id="pkR"><option value="">כל הרזולוציות</option>'+[...new Set(camsAll.map(x => x.r).filter(Boolean))].sort((a,b) => a - b).map(r => '<option value="'+r+'">'+r+'MP</option>').join('')+'</select>'+
+    '<select id="pkL"><option value="">כל העדשות</option>'+Object.keys(LENST).map(k => '<option value="'+k+'">'+LENST[k]+'</option>').join('')+'</select>'+
+    (techs.length > 1 ? '<select id="pkT"><option value="">IP ו־AHD</option>'+techs.map(t => '<option>'+t+'</option>').join('')+'</select>' : '')+
+    (brands.length > 1 ? '<select id="pkB"><option value="">כל היצרנים</option>'+brands.map(b => '<option>'+esc(b)+'</option>').join('')+'</select>' : '')+
+    (sups.length > 1 ? '<select id="pkS"><option value="">כל הספקים</option>'+sups.map(s => '<option value="'+s[0]+'">'+esc(s[1])+'</option>').join('')+'</select>' : '')+
+    '<label class="chk"><input type="checkbox" id="pkAll"> גם מוצרים שאינם מצלמות</label></div>'+
+    '<div id="pkList" style="max-height:50vh;overflow:auto;margin:6px 0 10px"></div>'+
+    '<h4>להחיל על</h4><div id="pkCab" style="max-height:18vh;overflow:auto"></div>');
+  m.querySelector('.mbox').style.maxWidth = '1100px';
+  const setv = (id, v) => { const e = m.querySelector(id); if (e) e.value = v; };
+  setv('#pkQ', pick.q); setv('#pkK', pick.kind); setv('#pkR', pick.res); setv('#pkL', pick.lt); setv('#pkT', pick.tech); setv('#pkB', pick.brand); setv('#pkS', pick.sup); m.querySelector('#pkAll').checked = pick.all;
+  const hook = (id, k, ev) => { const e = m.querySelector(id); if (e) e.addEventListener(ev || 'change', () => { pick[k] = e.type === 'checkbox' ? e.checked : e.value; pick.open = null; renderPkList(); }); };
+  hook('#pkQ', 'q', 'input'); hook('#pkK', 'kind'); hook('#pkR', 'res'); hook('#pkL', 'lt'); hook('#pkT', 'tech'); hook('#pkB', 'brand'); hook('#pkS', 'sup'); hook('#pkAll', 'all');
+  m.querySelector('#pkX').addEventListener('click', () => { pick = null; closeModal2(); });
+  const cabs = state.cables.filter(c => NET[c.type] || c.type === 'coax');
+  m.querySelector('#pkCab').innerHTML = cabs.length ? '<div class="btns" style="margin:0 0 6px"><button class="sm" id="pkAllC">סמן הכול</button><button class="sm" id="pkNoModel">רק בלי דגם מהמחירון</button><button class="sm" id="pkNone">נקה</button></div>'+
+    '<div style="display:flex;flex-wrap:wrap;gap:6px 10px">'+cabs.map(c => '<label class="chk" style="border:1px solid var(--line);border-radius:8px;padding:5px 9px;background:var(--panel);color:var(--ink);white-space:nowrap"><input type="checkbox" data-pkc="'+c.id+'"'+(pick.sel.has(c.id) ? ' checked' : '')+'> <b>'+esc(c.name)+'</b>&nbsp;<span class="psub">'+esc((camById(c.cam) && (camById(c.cam).sku || camLabel(camById(c.cam)))) || (NET[c.type] ? 'נקודת רשת' : 'ללא דגם'))+'</span></label>').join('')+'</div>'
+    : '<p class="muted">אין כבלים בפרויקט. המצלמה תתווסף למחירון שלך בלבד.</p>';
+  m.querySelectorAll('[data-pkc]').forEach(cb => cb.addEventListener('change', () => { const id = +cb.dataset.pkc; if (cb.checked) pick.sel.add(id); else pick.sel.delete(id); }));
+  const setAll = f => { pick.sel = new Set(cabs.filter(f).map(c => c.id)); renderPicker(); };
+  if (m.querySelector('#pkAllC')){ m.querySelector('#pkAllC').addEventListener('click', () => setAll(() => true)); m.querySelector('#pkNoModel').addEventListener('click', () => setAll(c => c.cam && isPlaceholderCam(camById(c.cam)))); m.querySelector('#pkNone').addEventListener('click', () => setAll(() => false)); }
+  renderPkList();
+}
+function pkFiltered(){
+  const words = pick.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  let list = allPlItems().filter(x => (pick.all || x.c === 'camera') && (!pick.kind || x.k === pick.kind) && (!pick.res || +x.r === +pick.res) && (!pick.lt || x.lt === pick.lt || (pick.lt === 'vf' && x.lt === 'motor'))
+    && (!pick.tech || x.t === pick.tech) && (!pick.brand || x.b === pick.brand) && (!pick.sup || x.list === pick.sup));
+  if (words.length) list = list.filter(x => { const t = (x.s + ' ' + x.n + ' ' + x.b + ' ' + specLine(x) + ' ' + (x.d || []).map(s => s.join(' ')).join(' ')).toLowerCase(); return words.every(w => t.includes(w)); });
+  return list.sort((a,b) => (a.np - b.np) || a.p - b.p);
+}
+function renderPkList(){
+  const el = $('#pkList'); if (!el || !pick) return;
+  const pe = 1 + (+state.pricing.profitEq || 0)/100, list = pkFiltered();
+  if (!list.length){ el.innerHTML = '<p class="muted">לא נמצאו מוצרים. נסה חיפוש אחר או נקה סינונים.</p>'; return; }
+  el.innerHTML = '<p class="muted" style="margin:0 0 4px">'+list.length+' תוצאות. לחץ על שורה כדי לראות את כל הפרטים.</p><div class="tblw"><table class="tbl"><thead><tr><th>דגם</th><th>פרטים עיקריים</th><th>ספק</th><th>עלות</th><th>ללקוח</th><th></th></tr></thead><tbody>'+
+    list.slice(0, 200).map((x, i) => '<tr data-pkr="'+i+'" style="cursor:pointer"><td><b style="direction:ltr;unicode-bidi:isolate">'+esc(x.s || '')+'</b><div class="psub">'+esc(x.n)+'</div></td><td class="psub">'+esc(specLine(x))+'</td>'+
+      '<td class="psub">'+esc(x.sup)+'</td><td class="n">'+(x.np ? 'לפי פנייה' : money(x.p))+'</td><td class="n">'+(x.np ? '—' : money(x.p*pe))+'</td><td><button class="sm primary" data-pk="'+i+'">בחר</button></td></tr>'+
+      (pick.open === i ? '<tr class="sec"><td colspan="6" style="font-weight:400">'+pkDetails(x)+'</td></tr>' : '')).join('')+'</tbody></table></div>'+
+    (list.length > 200 ? '<p class="muted">מוצגות 200 הזולות. צמצם בחיפוש או בסינון.</p>' : '');
+  el.querySelectorAll('[data-pk]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); chooseCamera(list[+b.dataset.pk]); }));
+  el.querySelectorAll('[data-pkr]').forEach(r => r.addEventListener('click', () => { const i = +r.dataset.pkr; pick.open = pick.open === i ? null : i; renderPkList(); }));
+}
+function pkDetails(x){
+  const rows = [['ספק', x.sup], ['מק״ט ספק', x.code], ['כמות בקרטון', x.ca], ['טכנולוגיה', x.t], ['סוג', x.k ? KINDS[x.k] : ''], ['עדשה', x.lx || (x.l ? x.l + 'mm' : '')], ['זווית צפייה', x.fov ? x.fov + '°' : ''], ['טווח תאורה', x.ir ? x.ir + ' מ׳' : '']]
+    .concat((x.d || []).filter(s => !/^(סדרה|רזולוציה|סוג המצלמה|מפתח עדשה|טווח תאורה)$/.test(s[0])))
+    .filter(r => r[1]);
+  return '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px 18px;font-size:13px">'+rows.map(r => '<div><span class="muted">'+esc(r[0])+':</span> '+esc(r[1])+'</div>').join('')+'</div>'+
+    (x.jb && x.jb.length ? '<p style="margin-top:6px;font-size:13px"><b>קופסת הגבהה לפי הספק:</b> '+x.jb.map(esc).join(', ')+'</p>' : '');
+}
+function catalogCameraFrom(x){
+  let cam = cat.cameras.find(c => x.s && c.sku && c.sku.toLowerCase() === x.s.toLowerCase());
+  const fields = {cost:x.p, supplier:x.sup || '', kindKey:x.k || '', jbList:x.jb || [], tech:x.t || '', fov:x.fov || lensFov(x.l), range:x.ir || lensRange(x.l)};
+  if (!cam){ cam = Object.assign({id:uid('c'), sku:x.s || '', brand:x.b || '', model:(x.s ? x.s + ' ' : '') + (x.n && x.n !== x.s ? x.n : '') || 'מצלמה', lens:x.l ? x.l + 'mm' : '', res:x.rt || (x.r ? x.r + 'MP' : ''), kind:KINDS[x.k] || ''}, fields); cat.cameras.push(cam); }
+  else Object.assign(cam, fields);
+  return cam;
+}
+async function chooseCamera(x){
+  const cam = catalogCameraFrom(x), ids = [...pick.sel];
+  if (ids.length){ snapshot(); state.cables.forEach(c => { if (pick.sel.has(c.id)) c.cam = cam.id; }); save(); }
+  saveCat();
+  pick = null;
+  openJboxPrompt(cam, ids.length, x.np);
+}
+function camFamily(cam){ const s = String(cam.sku || '').toUpperCase(); const m = /^([A-Z]+\d*)(?=-)/.exec(s.replace(/^(DS-|DH-)/, '')); return m ? m[1] : ''; }
+function jboxScore(j, cam){
+  const t = (j.s + ' ' + j.n + ' ' + (j.d || []).map(s => s[1]).join(' ')).toUpperCase(), sku = String(j.s || '').toUpperCase(); let s = 0;
+  if ((cam.jbList || []).some(m => m.toUpperCase() === sku)) s += 30;
+  if (cam.jbox && j.s && cam.jbox === j.s) s += 20;
+  if (cam.brand && j.b === cam.brand) s += 2; else if (cam.brand && j.b && j.b !== cam.brand) s -= 4;
+  const fam = camFamily(cam);
+  if (fam && fam.length >= 2 && new RegExp('(^|[^A-Z0-9])' + fam + '(?![0-9])(-[A-Z]+)?', 'i').test(t)){
+    s += 6;
+    const vf = /VF|MVF|\d-\d+MM/i.test(cam.sku + ' ' + cam.lens);
+    if (new RegExp(fam + '-(FIXED)', 'i').test(t)) s += vf ? -5 : 3;
+    if (new RegExp(fam + '-(VF)', 'i').test(t)) s += vf ? 3 : -5;
+  }
+  const core = String(cam.sku || '').toUpperCase().replace(/^(DS-|DH-|IPC-)/, '').split(/[-/ ]/)[0];
+  if (core.length >= 4 && core !== fam && t.includes(core)) s += 6;
+  const ks = kindsIn(t.toLowerCase()), ck = cam.kindKey || '';
+  if (ks.length && ck) s += ks.includes(ck) ? 2 : -3;
+  if (cam.tech === 'AHD' && /\bAHD\b/.test(t)) s += 2; if (cam.tech === 'IP' && /\bAHD\b/.test(t) && !/\bIP\b/.test(t)) s -= 3;
+  return s;
+}
+function openJboxPrompt(cam, nCables, noPrice){
+  const boxes = allPlItems().filter(x => x.c === 'jbox' && !/אינטרקום|intercom|דורבל|doorbell|מסך/i.test(x.n + ' ' + x.s)).map(x => Object.assign({score:jboxScore(x, cam)}, x)).sort((a,b) => b.score - a.score || a.p - b.p);
+  const generic = cat.items.find(it => it.base === 'cams' && /קופס/.test(it.name || ''));
+  const listed = (cam.jbList || []).filter(m => !boxes.some(b => String(b.s).toUpperCase() === m.toUpperCase()));
+  const head = '<div class="pghead"><h2 style="margin:0">להוסיף קופסת הגבהה?</h2><button id="jbX" aria-label="סגור">✕</button></div>'+
+    '<p class="muted" style="margin-bottom:10px">המצלמה <b>'+esc(camLabel(cam))+'</b> נוספה'+(nCables ? ' ל־'+nCables+' כבלים' : ' למחירון')+'. אם תבחר קופסה, היא תיספר אוטומטית לכל מצלמה מהדגם הזה, בכל פרויקט.</p>'+
+    (noPrice ? '<div class="warnbox">למצלמה הזו אין מחיר במחירון (לפי פנייה). עדכן את העלות במחירון ← מצלמות.</div>' : '')+
+    (listed.length ? '<p class="muted">הספק ממליץ גם על: '+listed.map(esc).join(', ')+' (לא נמצאו במחירון עם מחיר).</p>' : '');
+  if (!boxes.length){
+    const m = openModal2(head + '<div class="warnbox">לא נמצאו קופסאות הגבהה במחירונים שהעלית.</div><div class="btns"><button class="primary" id="jbNo">סגור</button></div>');
+    m.querySelector('#jbX').addEventListener('click', jbDone); m.querySelector('#jbNo').addEventListener('click', jbDone); return;
+  }
+  let q = '';
+  const m = openModal2(head + '<input type="text" id="jbQ" placeholder="חיפוש קופסה אחרת" style="width:100%;margin-bottom:8px"><div id="jbList" style="max-height:44vh;overflow:auto"></div>'+
+    (generic ? '<label class="chk" style="margin-top:10px"><input type="checkbox" id="jbGen" checked> הפסק לספור את הפריט הכללי "'+esc(generic.name)+'" לכל מצלמה (כדי שלא ייספר פעמיים)</label>' : '')+
+    '<div class="btns"><button id="jbNo">בלי קופסה</button></div>');
+  m.querySelector('.mbox').style.maxWidth = '820px';
+  const draw = () => {
+    const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const list = (words.length ? boxes.filter(x => words.every(w => (x.s + ' ' + x.n + ' ' + x.b).toLowerCase().includes(w))) : boxes).slice(0, words.length ? 60 : 8);
+    m.querySelector('#jbList').innerHTML = '<div class="tblw"><table class="tbl"><thead><tr><th>קופסה</th><th>התאמה</th><th>עלות</th><th></th></tr></thead><tbody>'+
+      list.map((x, i) => '<tr><td><b style="direction:ltr;unicode-bidi:isolate">'+esc(x.s)+'</b><div class="psub">'+esc(x.n)+(x.sup ? ' · '+esc(x.sup) : '')+'</div></td>'+
+        '<td>'+(x.score >= 30 ? '<b style="color:var(--sel)">מומלצת בטבלת הספק</b>' : x.score >= 20 ? '<b style="color:var(--sel)">בחרת בה בעבר</b>' : x.score >= 8 ? '<b style="color:var(--sel)">מתאימה לדגם</b>' : x.score >= 5 ? '<b>מתאימה לסדרה ולסוג</b>' : x.score >= 2 ? 'אותו יצרן' : '<span class="muted">כללית</span>')+'</td>'+
+        '<td class="n">'+(x.np ? 'לפי פנייה' : money(x.p))+'</td><td><button class="sm'+(i === 0 && !words.length && x.score >= 5 ? ' primary' : '')+'" data-jb="'+i+'">בחר</button></td></tr>').join('')+'</tbody></table></div>'+
+      (!words.length ? '<p class="muted" style="margin-top:6px">ההמלצה מבוססת על עמודת הקופסה במחירון הספק, ואם אין, על סדרת הדגם, סוג העדשה וסוג המצלמה. ודא מול מפרט היצרן.</p>' : '');
+    m.querySelectorAll('[data-jb]').forEach(b => b.addEventListener('click', () => chooseJbox(cam, list[+b.dataset.jb], m.querySelector('#jbGen') && m.querySelector('#jbGen').checked ? generic : null)));
+  };
+  m.querySelector('#jbQ').addEventListener('input', e => { q = e.target.value; draw(); });
+  m.querySelector('#jbX').addEventListener('click', jbDone);
+  m.querySelector('#jbNo').addEventListener('click', () => { cam.jbox = 'none'; saveCat(); jbDone(); });
+  draw();
+}
+function chooseJbox(cam, x, generic){
+  let it = cat.items.find(i => i.sku && x.s && i.sku.toLowerCase() === x.s.toLowerCase());
+  if (!it){ it = {id:uid('i'), sku:x.s, name:'קופסת הגבהה ' + (x.s || x.n), unit:'יח׳', cost:x.p, base:'camset:' + cam.id, per:1}; cat.items.push(it); }
+  else { if (x.p > 0) it.cost = x.p; const ids = it.base && it.base.startsWith('camset:') ? it.base.slice(7).split(',').filter(Boolean) : []; if (!ids.includes(cam.id)) ids.push(cam.id); it.base = 'camset:' + ids.join(','); it.per = 1; }
+  cam.jbox = x.s || '';
+  if (generic) generic.base = '';
+  saveCat(); jbDone(it.name);
+}
+function jbDone(added){
+  closeModal2();
+  if (viewMode === 'price') renderPricing($('#page')); else if (viewMode === 'plan'){ render(); renderPanel(); } else renderPage();
+  pgMsg('המצלמה נבחרה' + (typeof added === 'string' ? ' ו"' + esc(added) + '" תיספר לכל מצלמה מהדגם.' : '.'));
+}
+
 /* ---------- navigation chrome & mobile tables ---------- */
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.1';
 document.querySelectorAll('.appver').forEach(e => { e.textContent = APP_VERSION; });
 function labelTables(root){
   (root || document).querySelectorAll('table.tbl').forEach(tb => {
