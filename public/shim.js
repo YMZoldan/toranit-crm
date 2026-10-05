@@ -153,7 +153,9 @@
     test: () => api('POST', '/api/sumit/test', {}),
     docTypes: () => api('GET', '/api/sumit/doctypes'),
     saveCustomer: c => api('POST', '/api/sumit/customer', { customer: c }),
-    createDocument: d => api('POST', '/api/sumit/document', d)
+    createDocument: d => api('POST', '/api/sumit/document', d),
+    sync: days => api('POST', '/api/sumit/sync', { days }),
+    syncStatus: () => api('GET', '/api/sumit/syncstatus')
   };
   const caps = { db, user, assets, downloads, sumit };
   window.claude = Object.freeze({

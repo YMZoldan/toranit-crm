@@ -432,6 +432,8 @@ function normCatalog(c){
   c.service = Object.assign({hourly:0, callout:0}, c.service || {});
   c.billing = Object.assign({termsDays:30}, c.billing || {});
   c.sumit.types = Object.assign({quote:null, payreq:null, receipt:null, invrec:null, invoice:null}, c.sumit.types || {});
+  Object.keys(c.sumit.types).forEach(k => { const v = c.sumit.types[k]; const m = typeof v === 'string' ? /\((-?\d+)\)\s*$/.exec(v) : null; if (m) c.sumit.types[k] = +m[1]; });
+  (c.sumit.typeList || []).forEach(t => { const m = typeof t.value === 'string' ? /^(.*?)\s*\((-?\d+)\)\s*$/.exec(t.value) : null; if (m){ t.value = +m[2]; t.name = t.name && !/\(\d+\)/.test(t.name) ? t.name : m[1]; } });
   return c;
 }
 let cat = (() => { try { const r = lsGet(CATKEY); if (r) return normCatalog(JSON.parse(r)); } catch(e) {} return normCatalog(null); })();
@@ -2705,7 +2707,7 @@ function intlPhone(p){ let d = String(p || '').replace(/\D/g, ''); if (!d) retur
 function reminderText(d){
   const c = customers[d.customerId] || {}, late = daysLate(d);
   return 'שלום ' + (c.contact || c.name || '') + ',\n' + 'תזכורת לגבי ' + DOCK[d.kind] + (d.number ? ' מספר ' + d.number : '') + ' על סך ' + money(docBalance(d)) +
-    (docDue(d) ? (late > 0 ? ', שמועד התשלום שלה היה ' : ', לתשלום עד ') + dmy(docDue(d)) : '') + '.' + (d.url ? '\nלצפייה במסמך: ' + d.url : '') +
+    (docDue(d) ? (late > 0 ? ', שמועד התשלום שלה היה ' : ', לתשלום עד ') + dmy(docDue(d)) : '') + '.' + (d.payUrl ? '\nלתשלום מאובטח: ' + d.payUrl : d.url ? '\nלצפייה במסמך: ' + d.url : '') +
     '\nתודה, ' + (cat.company.name || '') + (cat.company.phone ? ' ' + cat.company.phone : '');
 }
 
@@ -2718,7 +2720,8 @@ function receivePayment(d){
   const c = customers[d.customerId];
   if (!c){ pgMsg('הלקוח של המסמך הזה לא נמצא.', true); return; }
   if (sumitReady()){
-    if (d.kind === 'payreq') openComposer({kind:'invrec', customerId:c.id, projectId:d.projectId, items:(d.items || []).map(i => ({name:i.name, qty:i.qty, price:i.price})), description:'תשלום עבור ' + DOCK[d.kind] + (d.number ? ' ' + d.number : ''), link:{type:'doc', id:d.id}});
+    const its = (d.items || []).length ? d.items.map(i => ({name:i.name, qty:i.qty, price:i.price})) : [{name:(d.projectName || DOCK[d.kind]) + (d.number ? ' (' + DOCK[d.kind] + ' ' + d.number + ')' : ''), qty:1, price:r2(docBalance(d) / (1 + (+cat.defaults.vat || 0)/100))}];
+    if (d.kind === 'payreq') openComposer({kind:'invrec', customerId:c.id, projectId:d.projectId, items:its, description:'תשלום עבור ' + DOCK[d.kind] + (d.number ? ' ' + d.number : ''), link:{type:'doc', id:d.id}});
     else openComposer({kind:'receipt', customerId:c.id, projectId:d.projectId, payAmount:docBalance(d), description:'תשלום עבור ' + DOCK[d.kind] + (d.number ? ' ' + d.number : ''), link:{type:'doc', id:d.id}});
   } else markPaid(d);
 }
@@ -2746,7 +2749,9 @@ function applyPayment(d, amount, info){
 function renderBilling(pg){
   pg = pg || $('#page'); if (viewMode !== 'billing') return;
   const st = billingStats();
-  let h = '<div class="pg"><div class="pghead"><div><h2 style="margin:0">גבייה</h2><p class="muted">דרישות תשלום וחשבוניות שעוד לא שולמו במלואן.'+(sumitReady() ? '' : ' '+NO_SUMIT)+'</p></div></div><div id="pgMsg"></div>';
+  let h = '<div class="pg"><div class="pghead"><div><h2 style="margin:0">גבייה</h2><p class="muted">דרישות תשלום וחשבוניות שעוד לא שולמו במלואן.'+(sumitReady() ? '' : ' '+NO_SUMIT)+'</p></div>'+
+    (sumitReady() ? '<div class="btns" style="margin:0;align-items:center"><select id="blDays"><option value="90">3 חודשים אחרונים</option><option value="365" selected>שנה אחרונה</option><option value="730">שנתיים</option><option value="1825">5 שנים</option></select><button class="primary" id="blSync">סנכרן עם סאמיט</button></div>' : '')+
+    '</div><div id="pgMsg"></div>'+(sumitReady() ? '<p class="muted" id="blSyncSt" style="margin:-4px 0 10px"></p>' : '');
   h += '<div class="stats"><div class="stat"><span>פתוח לגבייה ('+st.open.length+')</span><b>'+money0(st.openSum)+'</b></div>'+
     '<div class="stat"><span>באיחור ('+st.late.length+')</span><b style="color:'+(st.late.length ? 'var(--danger)' : '')+'">'+money0(st.lateSum)+'</b></div>'+
     '<div class="stat"><span>צפוי בשבוע הקרוב ('+st.soon.length+')</span><b>'+money0(st.soonSum)+'</b></div>'+
@@ -2756,6 +2761,17 @@ function renderBilling(pg){
   h += card('הגדרות גבייה', '<div class="frm">'+fld('ימי אשראי ברירת מחדל לחשבונית','billing.termsDays','number')+'</div><p class="muted" style="margin-top:6px">משמש לחישוב מועד התשלום של חשבוניות שאין להן תאריך יעד.</p>') + '</div>';
   pg.innerHTML = h;
   bindAll(pg, () => cat, () => { saveCat(); renderBlList(); });
+  if ($('#blSync')){
+    const showSt = r => { const el = $('#blSyncSt'); if (!el) return; if (!r){ el.textContent = 'עוד לא סונכרן. הסנכרון מושך מסאמיט דרישות תשלום וחשבוניות, כולל כאלה שהופקו ישירות בסאמיט, ומעדכן מה שולם.'; return; }
+      el.innerHTML = r.ok ? 'סנכרון אחרון: '+tsDate(r.at)+' '+new Date(r.at).toTimeString().slice(0,5)+' · נמצאו '+r.stats.found+' מסמכים, '+r.stats.newDocs+' חדשים, '+r.stats.updatedDocs+' עודכנו, '+r.stats.closed+' סומנו כשולמו'+(r.stats.newCustomers ? ', '+r.stats.newCustomers+' לקוחות חדשים' : '')+'. מתבצע גם אוטומטית כל שעה.'
+        : '<span style="color:var(--danger)">הסנכרון האחרון נכשל ('+tsDate(r.at)+'): '+esc(r.error || '')+'</span>'; };
+    sumitApi.syncStatus().then(showSt).catch(() => {});
+    $('#blSync').addEventListener('click', async e => {
+      const b = e.target; b.disabled = true; b.textContent = 'מסנכרן...'; pgMsg('מושך מסמכים מסאמיט. בפעם הראשונה זה יכול לקחת דקה.');
+      try { const r = await sumitApi.sync(+$('#blDays').value); await refreshCrm(); renderBilling(pg); pgMsg('הסנכרון הסתיים: '+r.stats.found+' מסמכים בסאמיט, '+r.stats.newDocs+' חדשים, '+r.stats.updatedDocs+' עודכנו, '+r.stats.closed+' סומנו כשולמו.'); }
+      catch(err){ pgMsg('הסנכרון נכשל: '+esc((err && err.message) || ''), true); b.disabled = false; b.textContent = 'סנכרן עם סאמיט'; }
+    });
+  }
   $('#blF').value = blF; $('#blF').addEventListener('change', e => { blF = e.target.value; renderBlList(); });
   $('#blQ').value = blQ; $('#blQ').addEventListener('input', e => { blQ = e.target.value; renderBlList(); });
   renderBlList();
@@ -2771,13 +2787,13 @@ function renderBlList(){
   let h = '<div class="tblw"><table class="tbl"><thead><tr><th>לקוח</th><th>מסמך</th><th>לתשלום עד</th><th>סכום</th><th>שולם</th><th>יתרה</th><th></th></tr></thead><tbody>';
   list.forEach(d => { const c = customers[d.customerId] || {}, late = daysLate(d), open = docOpen(d);
     h += '<tr><td><a href="#" data-cu="'+esc(d.customerId || '')+'" class="pname">'+esc(c.name || 'לקוח לא נמצא')+'</a>'+(d.projectName ? '<div class="psub">'+esc(d.projectName)+'</div>' : '')+'</td>'+
-      '<td>'+DOCK[d.kind]+(d.number ? ' '+esc(String(d.number)) : '')+'<div class="psub">'+tsDate(d.created)+(d.reminders ? ' · '+d.reminders+' תזכורות' : '')+'</div></td>'+
+      '<td>'+DOCK[d.kind]+(d.number ? ' '+esc(String(d.number)) : '')+'<div class="psub">'+tsDate(d.created)+(d.source === 'sumit' ? ' · מסאמיט' : '')+(d.reminders ? ' · '+d.reminders+' תזכורות' : '')+'</div></td>'+
       '<td class="'+(open && late > 0 ? 'late' : '')+'">'+dmy(docDue(d))+(open && late > 0 ? '<div class="psub late">'+late+' ימי איחור</div>' : '')+'</td>'+
       '<td class="n">'+money(d.total)+'</td><td class="n">'+money(d.paid || 0)+'</td><td class="n"><b>'+money(Math.max(0, docBalance(d)))+'</b></td>'+
       '<td style="white-space:nowrap">'+(open ? '<button class="sm primary" data-pay="'+d.id+'">התקבל תשלום</button> '+(sumitReady() ? '<button class="sm" data-mark="'+d.id+'" title="רישום בלי להפיק מסמך">סמן כשולם</button> ' : '')+
         (c.phone ? '<a class="sm" style="padding:4px 6px" data-rem="'+d.id+'" href="https://wa.me/'+intlPhone(c.phone)+'?text='+encodeURIComponent(reminderText(d))+'" target="_blank" rel="noopener">וואטסאפ</a> ' : '')+
         (c.email ? '<a class="sm" style="padding:4px 6px" data-rem="'+d.id+'" href="mailto:'+encodeURIComponent(c.email)+'?subject='+encodeURIComponent('תזכורת תשלום – '+DOCK[d.kind]+(d.number ? ' '+d.number : ''))+'&body='+encodeURIComponent(reminderText(d))+'">מייל</a> ' : '') : '<span class="psub">שולם</span> ')+
-      (d.url ? '<a href="'+esc(d.url)+'" target="_blank" rel="noopener">PDF</a>' : '')+'</td></tr>'; });
+      (d.url ? '<a href="'+esc(d.url)+'" target="_blank" rel="noopener">PDF</a>' : '')+(d.payUrl && open ? ' · <a href="'+esc(d.payUrl)+'" target="_blank" rel="noopener">קישור תשלום</a>' : '')+'</td></tr>'; });
   el.innerHTML = h + '</tbody></table></div>';
   el.querySelectorAll('[data-pay]').forEach(b => b.addEventListener('click', () => receivePayment(documents[b.dataset.pay])));
   el.querySelectorAll('[data-mark]').forEach(b => b.addEventListener('click', () => markPaid(documents[b.dataset.mark])));
@@ -3394,7 +3410,7 @@ function jbDone(added){
 }
 
 /* ---------- navigation chrome & mobile tables ---------- */
-const APP_VERSION = '1.7.1';
+const APP_VERSION = '1.8.0';
 document.querySelectorAll('.appver').forEach(e => { e.textContent = APP_VERSION; });
 function labelTables(root){
   (root || document).querySelectorAll('table.tbl').forEach(tb => {

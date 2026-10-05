@@ -2,9 +2,9 @@
 
 ## הדרך המהירה: שרת חדש (Kamatera או כל שרת Ubuntu)
 ```bash
-scp cameras-v1.7.1.zip root@SERVER-IP:/root/   # מהמחשב, ב-PowerShell
+scp cameras-v1.8.0.zip root@SERVER-IP:/root/   # מהמחשב, ב-PowerShell
 ssh root@SERVER-IP                             # התחברות לשרת
-apt-get install -y unzip && unzip -o cameras-v1.7.1.zip && bash cameras/install.sh
+apt-get install -y unzip && unzip -o cameras-v1.8.0.zip && bash cameras/install.sh
 ```
 הסקריפט שואל דומיין, אימייל וסיסמה, ומתקין: עדכונים, חומת אש, fail2ban, Docker,
 Traefik עם תעודת HTTPS, את האפליקציה, וגיבוי לילי. מריצים אותו שוב לעדכון גרסה.
@@ -80,6 +80,9 @@ docker compose logs -f app      # צריך להופיע: listening on 3000
 ```bash
 docker compose exec db psql -U cameras -c "SELECT at, endpoint, ok, message, ref FROM sumit_log ORDER BY id DESC LIMIT 20;"
 ```
+
+**סנכרון:** במסך גבייה ← "סנכרן עם סאמיט". נמשכים כל המסמכים מהתקופה שנבחרה, ומסמך שנסגר בסאמיט מסומן כשולם.
+השרת מסנכרן גם לבד כל שעה (120 הימים האחרונים). יומן: `docker compose logs app | grep "sumit sync"`.
 
 **ייבוא לקוחות:** בסאמיט ייצא את רשימת הלקוחות לאקסל, ובאפליקציה: לקוחות ← "ייבוא מקובץ של סאמיט".
 לקוחות קיימים מזוהים לפי מספר לקוח בסאמיט, ח.פ, אימייל או טלפון, ומתעדכנים במקום להשתכפל.

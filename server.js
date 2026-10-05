@@ -303,7 +303,7 @@ async function sumitCall(endpoint, body, user, ref) {
   finally { clearTimeout(timer); }
   let j;
   try { j = await r.json(); } catch (e) { await sumitLog(user && user.id, endpoint, false, 'bad json http ' + r.status, ref); throw new SumitError('תשובה לא תקינה מסאמיט (HTTP ' + r.status + ').'); }
-  const statusOk = j.Status === 0 || j.Status === '0' || j.Status === 'Success' || (j.Status === undefined && r.ok);
+  const st = j.Status, statusOk = st === 0 || st === '0' || (typeof st === 'string' && /^success/i.test(st)) || (st === undefined && r.ok);
   if (!statusOk || j.UserErrorMessage) {
     const msg = j.UserErrorMessage || j.TechnicalErrorDetails || ('סאמיט החזירה שגיאה (' + String(j.Status) + ').');
     await sumitLog(user && user.id, endpoint, false, msg + (j.TechnicalErrorDetails && j.TechnicalErrorDetails !== msg ? ' | ' + j.TechnicalErrorDetails : ''), ref);
@@ -325,15 +325,26 @@ function sumitCustomer(c) {
     CompanyNumber: str(c.companyNumber, 30) || null, NoVAT: null, SearchMode: null, Folder: null, Properties: null
   };
 }
-const PAY_DETAILS = { cash: 'Details_Cash', transfer: 'Details_BankTransfer', cheque: 'Details_Cheque', credit: 'Details_CreditCard', other: 'Details_Other' };
+const PAY_DETAILS = { cash: 1, transfer: 1, cheque: 1, credit: 1, other: 1 };
 function sumitPayment(p) {
-  const o = { Amount: r2(p.amount) };
-  o[PAY_DETAILS[p.method]] = p.method === 'credit'
-    ? { Last4Digits: /^\d{4}$/.test(String(p.last4 || '')) ? String(p.last4) : null, Payments: numIn(p.installments, 1, 36) || 1 }
-    : {};
-  return o;
+  const ref = str(p.ref, 60) || null;
+  if (p.method === 'cash') return { Amount: r2(p.amount), Type: 2, Details_Cash: {} };
+  if (p.method === 'transfer') return { Amount: r2(p.amount), Type: 3, Details_BankTransfer: { Reference: ref } };
+  if (p.method === 'cheque') return { Amount: r2(p.amount), Type: 4, Details_Cheque: { ChequeNumber: ref } };
+  if (p.method === 'credit') return { Amount: r2(p.amount), Type: 5, Details_CreditCard: { Last4Digits: /^\d{4}$/.test(String(p.last4 || '')) ? String(p.last4) : null, Payments: numIn(p.installments, 1, 36) || 1 } };
+  return { Amount: r2(p.amount), Type: 6, Details_Digital: { Type: 'Other', Description: ref || 'תשלום דיגיטלי' } };
 }
 const KINDS = ['quote', 'payreq', 'receipt', 'invrec', 'invoice'];
+const SUMIT_TYPE_NUM = { Invoice: 0, InvoiceAndReceipt: 1, Receipt: 2, ProformaInvoice: 3, DonationReceipt: 4, CreditInvoice: 5, CreditInvoiceAndReceipt: 6, CreditReceipt: 7, Order: 8, DeliveryNote: 9, GoodsReturnNote: 10, PurchasingOrder: 11, PriceQuotation: 12, PaymentRequest: 13 };
+const TYPE_KIND = { 0: 'invoice', 1: 'invrec', 2: 'receipt', 12: 'quote', 13: 'payreq' };
+function enumNum(v, names) {
+  if (typeof v === 'number') return v;
+  const s = String(v == null ? '' : v).trim();
+  const m = /\((-?\d+)\)\s*$/.exec(s); if (m) return +m[1];
+  if (/^-?\d+$/.test(s)) return +s;
+  if (names && names[s] != null) return names[s];
+  return null;
+}
 
 app.get('/api/sumit/status', auth, async (req, res, next) => {
   try {
@@ -389,7 +400,11 @@ app.get('/api/sumit/doctypes', auth, async (req, res, next) => {
       const m = /(-?\d+)\s*(?:=|-|:|–)\s*([^\n<]+)/.exec(line.replace(/<[^>]+>/g, ' '));
       if (m) fromDesc[m[1]] = m[2].trim();
     });
-    const types = vals.map((v, i) => ({ value: v, name: names[i] || descs[i] || fromDesc[String(v)] || (typeof v === 'string' ? v : '') }));
+    const types = vals.map((v, i) => {
+      const m = typeof v === 'string' ? /^(.*?)\s*\((-?\d+)\)\s*$/.exec(v) : null;
+      if (m) return { value: +m[2], name: m[1] };
+      return { value: v, name: names[i] || descs[i] || fromDesc[String(v)] || (typeof v === 'string' ? v : '') };
+    });
     const v = { types, rawDescription: String(t.description || typeProp.description || '').slice(0, 4000) };
     docTypesCache = { t: Date.now(), v };
     res.json(v);
@@ -410,6 +425,8 @@ app.post('/api/sumit/document', auth, csrf, express.json({ limit: '300kb' }), as
     const b = req.body || {};
     if (!KINDS.includes(b.kind)) return bad(res, 'סוג מסמך לא מוכר.');
     if (b.type === null || b.type === undefined || b.type === '' || (typeof b.type !== 'number' && typeof b.type !== 'string')) return bad(res, 'לא הוגדר סוג המסמך בסאמיט.');
+    const typeNum = enumNum(b.type, SUMIT_TYPE_NUM);
+    if (typeNum === null) return bad(res, 'סוג המסמך לא מוכר בסאמיט. טען מחדש את סוגי המסמכים במסך מחירון.');
     const cu = b.customer || {};
     if (!str(cu.name, 200)) return bad(res, 'חסר שם לקוח.');
     const items = Array.isArray(b.items) ? b.items.slice(0, 200) : [];
@@ -422,7 +439,7 @@ app.post('/api/sumit/document', auth, csrf, express.json({ limit: '300kb' }), as
     if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return bad(res, 'כתובת אימייל לא תקינה.');
     const refs = pays.map(p => str(p.ref, 60)).filter(Boolean);
     const Details = {
-      IsDraft: !!b.draft, Date: null, Customer: sumitCustomer(cu), Type: b.type, Language: null, Currency: null,
+      IsDraft: !!b.draft, Date: null, Customer: sumitCustomer(cu), Type: typeNum, Language: null, Currency: null,
       Description: str(b.description, 500) || null, ExternalReference: str(b.externalRef, 100) || null,
       SendByEmail: email ? { EmailAddress: email, Original: true, SendAsPaymentRequest: b.kind === 'payreq' } : null,
       DueDate: (b.kind === 'payreq' || b.kind === 'invoice') && /^\d{4}-\d{2}-\d{2}$/.test(b.dueDate || '') ? b.dueDate + 'T00:00:00' : null,
@@ -442,6 +459,90 @@ app.post('/api/sumit/document', auth, csrf, express.json({ limit: '300kb' }), as
       customerId: d.CustomerID != null ? d.CustomerID : null
     });
   } catch (e) { next(e); }
+});
+
+/* ---------- SUMIT -> app sync (documents, payment status, customers) ---------- */
+const ROOT = 'data/users/team/root';
+const SYNC_DOC = 'data/users/team/sumitsync';
+let syncRunning = null;
+async function readCollection(col) {
+  const r = await pool.query('SELECT path, data FROM docs WHERE collection = $1', [col]);
+  const out = {}; r.rows.forEach(x => { out[x.path.split('/').pop()] = x.data; }); return out;
+}
+async function writeDoc(path, data, userId) {
+  const i = path.lastIndexOf('/');
+  await pool.query(`INSERT INTO docs (path, collection, data, updated_at, updated_by) VALUES ($1, $2, $3::jsonb, now(), $4)
+    ON CONFLICT (path) DO UPDATE SET data = EXCLUDED.data, updated_at = now(), updated_by = EXCLUDED.updated_by`, [path, path.slice(0, i), JSON.stringify(data), userId || null]);
+}
+const isoDay = d => new Date(d).toISOString().slice(0, 10) + 'T00:00:00';
+const normName = s => String(s || '').replace(/["'״׳`]/g, '').replace(/בע"?מ|בעמ|ltd\.?/gi, '').replace(/\s+/g, ' ').trim().toLowerCase();
+async function syncFromSumit(user, days) {
+  if (syncRunning) return syncRunning;
+  syncRunning = (async () => {
+    const started = Date.now();
+    const from = isoDay(Date.now() - Math.max(7, Math.min(3650, days || 365)) * 864e5), to = isoDay(Date.now() + 864e5);
+    const list = [];
+    for (let page = 0, start = 0, more = true; more && page < 200; page++) {
+      const d = await sumitCall('/accounting/documents/list/', { DocumentTypes: [0, 1, 2, 12, 13], DateFrom: from, DateTo: to, IncludeDrafts: false, Paging: { StartIndex: start, PageSize: 100 } }, user, 'sync list ' + start);
+      const got = d.Documents || [];
+      got.forEach(x => list.push(x));
+      start += got.length;
+      more = !!d.HasNextPage && got.length > 0;
+    }
+    const customers = await readCollection(ROOT + '/customers');
+    const documents = await readCollection(ROOT + '/documents');
+    const bySumitCust = {}, byName = {};
+    Object.values(customers).forEach(c => { if (c.sumitId != null && c.sumitId !== '') bySumitCust[String(c.sumitId)] = c; const n = normName(c.name); if (n && !byName[n]) byName[n] = c; });
+    const bySumitDoc = {}, byId = {};
+    Object.values(documents).forEach(d => { if (d.sumitId != null) bySumitDoc[String(d.sumitId)] = d; byId[d.id] = d; });
+    const stats = { found: list.length, newDocs: 0, updatedDocs: 0, closed: 0, newCustomers: 0, linkedCustomers: 0 };
+    for (const x of list) {
+      const t = enumNum(x.Type, SUMIT_TYPE_NUM), kind = TYPE_KIND[t];
+      if (!kind || x.IsDraft) continue;
+      const cid = x.CustomerID != null ? String(x.CustomerID) : '';
+      let cust = cid ? bySumitCust[cid] : null;
+      if (!cust && x.CustomerName) {
+        const hit = byName[normName(x.CustomerName)];
+        if (hit && (hit.sumitId == null || hit.sumitId === '')) { cust = hit; cust.sumitId = x.CustomerID; cust.updated = Date.now(); bySumitCust[cid] = cust; await writeDoc(ROOT + '/customers/' + cust.id, cust, user && user.id); stats.linkedCustomers++; }
+      }
+      if (!cust && (cid || x.CustomerName)) {
+        cust = { id: 'c' + crypto.randomBytes(6).toString('hex'), name: String(x.CustomerName || ('לקוח ' + cid)).slice(0, 200), companyNumber: '', contact: '', phone: '', email: '', city: '', address: '', zip: '', notes: '',
+          sumitId: x.CustomerID != null ? x.CustomerID : null, source: 'sumit', created: Date.now(), updated: Date.now() };
+        if (cid) bySumitCust[cid] = cust; byName[normName(cust.name)] = cust;
+        await writeDoc(ROOT + '/customers/' + cust.id, cust, user && user.id); stats.newCustomers++;
+      }
+      const total = Math.round(Number(x.DocumentValue || 0) * 100) / 100;
+      const created = x.Date ? Date.parse(x.Date) || Date.now() : Date.now();
+      const due = x.DueDate ? String(x.DueDate).slice(0, 10) : '';
+      let d = bySumitDoc[String(x.DocumentID)] || (x.ExternalReference && byId[x.ExternalReference]) || null;
+      const isNew = !d;
+      if (!d) d = { id: 'sd' + x.DocumentID, kind, customerId: cust ? cust.id : null, projectId: null, projectName: String(x.Description || '').slice(0, 120), items: [], payments: [], paid: 0, payLog: [], source: 'sumit', created, emailed: false };
+      const snap = o => JSON.stringify(Object.assign({}, o, { sumitSynced: 0 }));
+      const before = snap(d);
+      Object.assign(d, { kind, sumitId: x.DocumentID, number: x.DocumentNumber != null ? x.DocumentNumber : d.number, url: x.DocumentDownloadURL || d.url || '', payUrl: x.DocumentPaymentURL || d.payUrl || '',
+        total: total || d.total || 0, draft: false, dueDate: due || d.dueDate || '', customerId: d.customerId || (cust ? cust.id : null), sumitClosed: !!x.IsClosed, sumitSynced: Date.now() });
+      if (!d.created) d.created = created;
+      if ((kind === 'payreq' || kind === 'invoice')) {
+        if (x.IsClosed) { if ((+d.paid || 0) < d.total - 0.05) { d.payLog = d.payLog || []; d.payLog.push({ amount: Math.round((d.total - (+d.paid || 0)) * 100) / 100, at: Date.now(), method: '', ref: 'נסגר בסאמיט', sumit: true }); d.paid = d.total; stats.closed++; } d.status = 'paid'; }
+        else d.status = (+d.paid || 0) > 0.05 ? 'partial' : 'open';
+      }
+      if (isNew || snap(d) !== before) { await writeDoc(ROOT + '/documents/' + d.id, d, user && user.id); if (isNew) stats.newDocs++; else stats.updatedDocs++; bySumitDoc[String(x.DocumentID)] = d; }
+    }
+    const result = { at: Date.now(), ms: Date.now() - started, days: days || 365, ok: true, stats };
+    await writeDoc(SYNC_DOC, result, user && user.id);
+    return result;
+  })().catch(async e => {
+    const result = { at: Date.now(), ok: false, error: (e && e.message) || 'sync failed' };
+    try { await writeDoc(SYNC_DOC, result, user && user.id); } catch (_) {}
+    throw e;
+  }).finally(() => { syncRunning = null; });
+  return syncRunning;
+}
+app.post('/api/sumit/sync', auth, csrf, express.json({ limit: '10kb' }), async (req, res, next) => {
+  try { const days = numIn(req.body && req.body.days, 7, 3650) || 365; res.json(await syncFromSumit(req.user, days)); } catch (e) { next(e); }
+});
+app.get('/api/sumit/syncstatus', auth, async (req, res, next) => {
+  try { const r = await pool.query('SELECT data FROM docs WHERE path = $1', [SYNC_DOC]); res.json(r.rows[0] ? r.rows[0].data : null); } catch (e) { next(e); }
 });
 
 /* ---------- static app ---------- */
@@ -513,6 +614,8 @@ async function main() {
     console.log('no users yet: run  docker compose exec app node server.js adduser <email> <password>');
   }
   const server = app.listen(PORT, () => console.log('listening on', PORT));
+  const autoSync = async () => { try { if (await getSumitCreds()) { const r = await syncFromSumit(null, 120); console.log('sumit sync:', JSON.stringify(r.stats)); } } catch (e) { console.log('sumit sync failed:', e.message); } };
+  if (process.env.SUMIT_AUTO_SYNC !== 'false') { setTimeout(autoSync, 90e3).unref(); setInterval(autoSync, 60 * 60e3).unref(); }
   const stop = () => { server.close(() => pool.end().then(() => process.exit(0))); setTimeout(() => process.exit(0), 5000).unref(); };
   process.on('SIGTERM', stop); process.on('SIGINT', stop);
 }
