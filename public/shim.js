@@ -161,10 +161,12 @@
   };
   const inbox = {
     keys: { list: () => api('GET', '/api/extkeys'), create: label => api('POST', '/api/extkeys', { label }), revoke: id => api('DELETE', '/api/extkeys/' + encodeURIComponent(id)) },
+    sources: { list: () => api('GET', '/api/plsources'), save: src => api('POST', '/api/plsources', src), remove: id => api('DELETE', '/api/plsources/' + encodeURIComponent(id)), run: (id, force) => api('POST', '/api/plsources/' + encodeURIComponent(id) + '/run' + (force ? '?force=1' : '')) },
     blob: async blobId => { const r = await fetch('/_blob/' + encodeURIComponent(blobId), { credentials: 'same-origin' }); if (!r.ok) throw new Error('הקובץ לא נמצא בשרת'); return r.blob(); }
   };
   const caps = { db, user, assets, downloads, sumit, inbox };
   window.__fetchProduct = url => api('POST', '/api/fetchproduct', { url });
+  window.__productImage = req => api('POST', '/api/productimage', req);
   window.claude = Object.freeze({
     use: async name => {
       if (!(name in caps)) return null;

@@ -328,6 +328,141 @@ app.post('/api/inbox', extAuth, express.raw({ type: () => true, limit: '40mb' })
   } catch (e) { next(e); }
 });
 
+/* ---------- price-list sources: a fixed download link per supplier, fetched every morning ---------- */
+const SRC_COL = 'data/users/team/plsources', INBOX_COL = 'data/users/team/root/plinbox';
+const dnsLookup = require('dns').promises.lookup;
+const isPrivateIp = ip => /^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(ip) || /^(::1|::|fc|fd|fe80:)/i.test(ip) || ip === '::ffff:127.0.0.1';
+async function checkPublicUrl(raw) {
+  let u; try { u = new URL(String(raw || '').trim()); } catch (e) { throw new SumitError('הקישור לא תקין'); }
+  const allowHttp = process.env.PLSOURCE_ALLOW_HTTP === 'true';
+  if (u.protocol !== 'https:' && !(allowHttp && u.protocol === 'http:')) throw new SumitError('אפשר רק קישור https');
+  if (process.env.PLSOURCE_ALLOW_PRIVATE !== 'true') {
+    if (/^(localhost|.*\.local|.*\.internal)$/i.test(u.hostname)) throw new SumitError('כתובת פנימית לא מותרת');
+    const addrs = await dnsLookup(u.hostname, { all: true }).catch(() => { throw new SumitError('הכתובת לא נמצאה'); });
+    if (addrs.some(a => isPrivateIp(a.address))) throw new SumitError('כתובת פנימית לא מותרת');
+  }
+  return u;
+}
+const israelHour = () => +new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem', hour: 'numeric', hour12: false }) % 24;
+const israelDay = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+async function runSource(src) {
+  const started = Date.now();
+  try {
+    const u = await checkPublicUrl(src.url);
+    const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 90e3);
+    let r; try { r = await fetch(u.toString(), { signal: ctl.signal, redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0 (Toranit CRM price list)' } }); } finally { clearTimeout(t); }
+    if (!r.ok) throw new Error('הספק החזיר שגיאה ' + r.status);
+    if (r.url && r.url !== u.toString()) await checkPublicUrl(r.url);
+    const len = +(r.headers.get('content-length') || 0); if (len > 40e6) throw new Error('הקובץ גדול מדי');
+    const buf = Buffer.from(await r.arrayBuffer()); if (buf.length > 40e6) throw new Error('הקובץ גדול מדי');
+    if (buf.length < 20) throw new Error('הקובץ ריק');
+    const head = buf.slice(0, 300).toString('latin1').toLowerCase();
+    if (/<html|<!doctype/.test(head)) throw new Error('התקבל דף אינטרנט ולא קובץ. ייתכן שהקישור דורש עכשיו כניסה לפורטל.');
+    const hash = sha256(buf.toString('base64'));
+    if (hash === src.lastHash) { Object.assign(src, { lastRun: Date.now(), lastDay: israelDay(), lastStatus: 'unchanged', lastError: '' }); }
+    else {
+      const cd = r.headers.get('content-disposition') || '';
+      let fileName = ''; const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd); if (m) { try { fileName = decodeURIComponent(m[1]); } catch (e) { fileName = m[1]; } }
+      if (!fileName) fileName = decodeURIComponent(u.pathname.split('/').pop() || 'pricelist.xlsx');
+      if (!INBOX_EXT.test(fileName)) fileName += /^PK/.test(buf.slice(0, 2).toString('latin1')) ? '.xlsx' : /^%PDF/.test(head) ? '.pdf' : '.csv';
+      fileName = fileName.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').slice(0, 160);
+      const blobId = crypto.randomBytes(16).toString('hex');
+      await fs.promises.writeFile(path.join(UPLOAD_DIR, blobId), buf, { flag: 'wx' });
+      await pool.query('INSERT INTO uploads (id, mime, size, created_by) VALUES ($1, $2, $3, $4)', [blobId, 'application/octet-stream', buf.length, null]);
+      const id = 'in' + crypto.randomBytes(6).toString('hex');
+      const data = { id, blobId, supplier: src.supplier, fileName, size: buf.length, at: Date.now(), status: 'new', source: 'url', sourceId: src.id };
+      await pool.query('INSERT INTO docs (path, collection, data, updated_at) VALUES ($1, $2, $3::jsonb, now())', [INBOX_COL + '/' + id, INBOX_COL, JSON.stringify(data)]);
+      Object.assign(src, { lastRun: Date.now(), lastDay: israelDay(), lastStatus: 'new', lastError: '', lastHash: hash, lastSize: buf.length });
+    }
+  } catch (e) {
+    Object.assign(src, { lastRun: Date.now(), lastDay: israelDay(), lastStatus: 'error', lastError: (e && e.name === 'AbortError') ? 'הספק לא ענה בזמן' : String((e && e.message) || e).slice(0, 200) });
+  }
+  src.lastMs = Date.now() - started;
+  await pool.query('UPDATE docs SET data = $2::jsonb, updated_at = now() WHERE path = $1', [SRC_COL + '/' + src.id, JSON.stringify(src)]);
+  return src;
+}
+const pubSrc = d => ({ id: d.id, supplier: d.supplier, url: d.url, hour: d.hour, lastRun: d.lastRun || null, lastStatus: d.lastStatus || '', lastError: d.lastError || '', lastSize: d.lastSize || 0 });
+app.get('/api/plsources', auth, async (req, res, next) => {
+  try { const r = await pool.query('SELECT data FROM docs WHERE collection = $1', [SRC_COL]); res.json(r.rows.map(x => pubSrc(x.data))); } catch (e) { next(e); }
+});
+app.post('/api/plsources', auth, csrf, express.json({ limit: '8kb' }), async (req, res, next) => {
+  try {
+    const b = req.body || {}, supplier = str(b.supplier, 60), hour = Math.min(23, Math.max(0, Math.round(+b.hour || 6)));
+    if (!supplier) return bad(res, 'חסר שם ספק');
+    const u = await checkPublicUrl(b.url);
+    const id = /^[a-f0-9]{12}$/.test(b.id || '') ? b.id : crypto.randomBytes(6).toString('hex');
+    const old = (await pool.query('SELECT data FROM docs WHERE path = $1', [SRC_COL + '/' + id])).rows[0];
+    const data = Object.assign(old ? old.data : { id, created: Date.now() }, { supplier, url: u.toString(), hour });
+    await pool.query(`INSERT INTO docs (path, collection, data, updated_at, updated_by) VALUES ($1, $2, $3::jsonb, now(), $4)
+      ON CONFLICT (path) DO UPDATE SET data = EXCLUDED.data, updated_at = now(), updated_by = EXCLUDED.updated_by`, [SRC_COL + '/' + id, SRC_COL, JSON.stringify(data), req.user.id]);
+    res.json(pubSrc(data));
+  } catch (e) { next(e); }
+});
+app.delete('/api/plsources/:id', auth, csrf, async (req, res, next) => {
+  try { if (!/^[a-f0-9]{12}$/.test(req.params.id)) return bad(res, 'bad id'); await pool.query('DELETE FROM docs WHERE path = $1', [SRC_COL + '/' + req.params.id]); res.json({ ok: true }); } catch (e) { next(e); }
+});
+app.post('/api/plsources/:id/run', auth, csrf, async (req, res, next) => {
+  try {
+    if (!/^[a-f0-9]{12}$/.test(req.params.id)) return bad(res, 'bad id');
+    const r = await pool.query('SELECT data FROM docs WHERE path = $1', [SRC_COL + '/' + req.params.id]);
+    if (!r.rows[0]) return res.status(404).json({ code: 'not_found', message: 'not found' });
+    const src = r.rows[0].data; src.lastHash = req.query.force === '1' ? '' : src.lastHash;
+    res.json(pubSrc(await runSource(src)));
+  } catch (e) { next(e); }
+});
+async function runDueSources() {
+  const r = await pool.query('SELECT data FROM docs WHERE collection = $1', [SRC_COL]);
+  const day = israelDay(), hour = israelHour();
+  for (const row of r.rows) { const s = row.data; if (s.lastDay !== day && hour >= (s.hour ?? 6)) { const x = await runSource(s); console.log('price list source', s.supplier, x.lastStatus, x.lastError || ''); } }
+}
+
+/* ---------- product images: Icecat lookup by brand + manufacturer part number, or an image link ---------- */
+const PIMG_COL = 'data/users/team/root/pimages';
+const pimgId = key => sha256('pimg:' + String(key).toUpperCase()).slice(0, 24);
+async function fetchT(url, ms, opt) {
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), ms);
+  try { return await fetch(url, Object.assign({ signal: ctl.signal, redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0 (Toranit CRM)' } }, opt || {})); } finally { clearTimeout(t); }
+}
+async function saveImageFrom(url, userId) {
+  const u = await checkPublicUrl(url);
+  const r = await fetchT(u.toString(), 30000);
+  if (!r.ok) throw new SumitError('התמונה לא ירדה (' + r.status + ')');
+  if (r.url && r.url !== u.toString()) await checkPublicUrl(r.url);
+  const mime = String(r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!IMG_TYPES.includes(mime)) throw new SumitError('הקישור לא מוביל לתמונה (jpg, png או webp)');
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (buf.length < 200 || buf.length > 8e6) throw new SumitError('גודל התמונה לא תקין');
+  const blobId = crypto.randomBytes(16).toString('hex');
+  await fs.promises.writeFile(path.join(UPLOAD_DIR, blobId), buf, { flag: 'wx' });
+  await pool.query('INSERT INTO uploads (id, mime, size, created_by) VALUES ($1, $2, $3, $4)', [blobId, mime, buf.length, userId || null]);
+  return blobId;
+}
+async function putPimg(key, data, userId) {
+  const id = pimgId(key), p = PIMG_COL + '/' + id, full = Object.assign({ id, key: String(key).toUpperCase(), at: Date.now() }, data);
+  await pool.query(`INSERT INTO docs (path, collection, data, updated_at, updated_by) VALUES ($1, $2, $3::jsonb, now(), $4)
+    ON CONFLICT (path) DO UPDATE SET data = EXCLUDED.data, updated_at = now(), updated_by = EXCLUDED.updated_by`, [p, PIMG_COL, JSON.stringify(full), userId || null]);
+  return full;
+}
+app.post('/api/productimage', auth, csrf, express.json({ limit: '8kb' }), async (req, res, next) => {
+  try {
+    const b = req.body || {}, key = str(b.key, 80);
+    if (!key) return bad(res, 'חסר מזהה מוצר');
+    if (b.url) { const blobId = await saveImageFrom(b.url, req.user.id); return res.json(await putPimg(key, { status: 'ok', src: '/_blob/' + blobId, source: 'url' }, req.user.id)); }
+    const user = str(b.icecatUser, 60) || 'openIcecat-live', mpn = str(b.mpn, 60), brand = str(b.brand, 40);
+    if (!mpn || !brand) return res.json(await putPimg(key, { status: 'notfound', reason: !brand ? 'לא זוהה יצרן' : 'אין מק"ט יצרן' }, req.user.id));
+    const q = (process.env.ICECAT_URL || 'https://live.icecat.biz/api') + '?lang=EN&shopname=' + encodeURIComponent(user) + '&ProductCode=' + encodeURIComponent(mpn) + '&Brand=' + encodeURIComponent(brand) + '&content=';
+    let j = null; try { const r = await fetchT(q, 20000, { headers: { 'User-Agent': 'Mozilla/5.0 (Toranit CRM)', Accept: 'application/json' } }); j = await r.json(); } catch (e) {}
+    const d = j && j.data;
+    const im = (d && d.Image) || {}, gal = (d && Array.isArray(d.Gallery) && d.Gallery[0]) || {};
+    const imgUrl = im.Pic500x500 || im.HighPic || im.LowPic || gal.Pic500x500 || gal.Pic || gal.LowPic || '';
+    const gi = (d && d.GeneralInfo) || {};
+    const title = gi.Title || (gi.TitleInfo && gi.TitleInfo.GeneratedLocalTitle && gi.TitleInfo.GeneratedLocalTitle.Value) || '';
+    if (!imgUrl) return res.json(await putPimg(key, { status: 'notfound', reason: (j && (j.Message || j.msg)) ? String(j.Message || j.msg).slice(0, 120) : 'לא נמצא ב-Icecat' }, req.user.id));
+    const blobId = await saveImageFrom(imgUrl, req.user.id);
+    res.json(await putPimg(key, { status: 'ok', src: '/_blob/' + blobId, source: 'icecat', title: String(title).slice(0, 200), icecatId: (gi.IcecatId || '') + '' }, req.user.id));
+  } catch (e) { next(e); }
+});
+
 /* ---------- product page lookup (one page, on request, approved shops only) ---------- */
 const FETCH_HOSTS = ['gamers-outlet.net'].concat(String(process.env.FETCH_HOSTS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean));
 const htmlDecode = s => String(s || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&#(\d+);/g, (m, n) => String.fromCharCode(+n)).replace(/\s+/g, ' ').trim();
@@ -794,6 +929,8 @@ async function main() {
   const server = app.listen(PORT, () => console.log('listening on', PORT));
   const autoSync = async () => { try { if (await getSumitCreds()) { try { const c = await syncCustomersFromSumit(null); console.log('sumit customers sync:', JSON.stringify(Object.assign({}, c.stats, { sampleKeys: undefined }))); } catch (e) { console.log('sumit customers sync failed:', e.message); } const r = await syncFromSumit(null, 120); console.log('sumit sync:', JSON.stringify(r.stats)); } } catch (e) { console.log('sumit sync failed:', e.message); } };
   if (process.env.SUMIT_AUTO_SYNC !== 'false') { setTimeout(autoSync, 90e3).unref(); setInterval(autoSync, 60 * 60e3).unref(); }
+  const srcTick = () => runDueSources().catch(e => console.log('price list sources failed:', e.message));
+  setTimeout(srcTick, 60e3).unref(); setInterval(srcTick, 15 * 60e3).unref();
   const stop = () => { server.close(() => pool.end().then(() => process.exit(0))); setTimeout(() => process.exit(0), 5000).unref(); };
   process.on('SIGTERM', stop); process.on('SIGINT', stop);
 }
