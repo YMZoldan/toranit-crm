@@ -1,6 +1,6 @@
 /* App shell cache: the app opens instantly and survives weak signal on site.
    API calls and plan images always go to the network. */
-const VERSION = 'cp-v15';
+const VERSION = 'cp-v16';
 const SHELL = ['/', '/shim.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', e => {

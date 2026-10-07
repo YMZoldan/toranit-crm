@@ -155,7 +155,8 @@
     saveCustomer: c => api('POST', '/api/sumit/customer', { customer: c }),
     createDocument: d => api('POST', '/api/sumit/document', d),
     sync: days => api('POST', '/api/sumit/sync', { days }),
-    syncCustomers: folder => api('POST', '/api/sumit/synccustomers', { folder: folder || null }),
+    syncCustomers: (folder, folders) => api('POST', '/api/sumit/synccustomers', { folder: folder || null, folders }),
+    custFolders: () => api('GET', '/api/sumit/custfolders'),
     syncCustStatus: () => api('GET', '/api/sumit/synccuststatus'),
     syncStatus: () => api('GET', '/api/sumit/syncstatus')
   };

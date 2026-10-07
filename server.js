@@ -773,37 +773,47 @@ const PROP_MAP = [
   ['name', /(^|_)(full)?name$|fullname|customername|^שם|title$/i],
   ['companyNumber', /companynumber|company_number|idnumber|taxid|vatid|ח\.?פ|ע\.?מ|תעודת זהות|identifier$/i],
   ['email', /e-?mail/i], ['phone', /phone|mobile|טלפון|נייד/i], ['city', /city|עיר|ישוב/i],
-  ['address', /address|street|כתובת|רחוב/i], ['zip', /zip|postal|מיקוד/i], ['contact', /contact|איש קשר/i]];
+  ['address', /address|street|כתובת|רחוב/i], ['zip', /zip|postal|מיקוד/i], ['contact', /contact|איש קשר/i], ['company', /company(?!.*number)|business|organization|חברה|שם עסק|עסק/i]];
 function mapCustomerProps(props) {
   const out = {}; const keys = Object.keys(props || {});
   for (const [field, re] of PROP_MAP) {
-    const k = keys.find(k => re.test(k) && !(field === 'name' && /(contact|city|folder|user|owner|file|status)/i.test(k)) && !(field === 'address' && /mail/i.test(k)) && !(field === 'phone' && /fax/i.test(k)));
+    const k = keys.find(k => re.test(k) && !(field === 'name' && /(contact|city|folder|user|owner|file|status|company)/i.test(k)) && !(field === 'address' && /mail/i.test(k)) && !(field === 'phone' && /fax/i.test(k)) && !(field === 'company' && /number|id$/i.test(k)));
     if (k) { const v = firstVal(props[k]); if (v) out[field] = v.slice(0, 200); }
   }
   return out;
 }
 const digits = s => String(s || '').replace(/\D/g, '');
-async function syncCustomersFromSumit(user, folderHint) {
+const CUST_CFG_DOC = 'data/users/team/sumitcustcfg';
+async function syncCustomersFromSumit(user, folderHint, folderIds) {
   if (custSyncRunning) return custSyncRunning;
   custSyncRunning = (async () => {
     const started = Date.now();
     const fl = await sumitCall('/crm/schema/listfolders/', { NameFilter: null }, user, 'cust folders');
     const folders = (fl.Folders || []).map(f => ({ id: f.ID, name: String(f.Name || '') }));
+    if (Array.isArray(folderIds)) await writeDoc(CUST_CFG_DOC, { folders: folderIds.map(String).slice(0, 20), at: Date.now() }, user && user.id);
+    const cfg = (await pool.query('SELECT data FROM docs WHERE path = $1', [CUST_CFG_DOC])).rows[0];
+    const chosen = cfg && Array.isArray(cfg.data.folders) && cfg.data.folders.length ? folders.filter(f => cfg.data.folders.includes(String(f.id))) : [];
     const hint = String(folderHint || '').trim();
-    const folder = (hint && folders.find(f => String(f.id) === hint || f.name === hint))
+    const auto = (hint && folders.find(f => String(f.id) === hint || f.name === hint))
       || folders.find(f => /^לקוחות$/.test(f.name.trim())) || folders.find(f => /^customers?$/i.test(f.name.trim()))
       || folders.find(f => /לקוח|customer|client/i.test(f.name));
-    if (!folder) throw new SumitError('לא נמצאה תיקיית לקוחות בסאמיט. התיקיות שנמצאו: ' + (folders.map(f => f.name).join(', ') || 'אין'));
+    const use = chosen.length ? chosen : auto ? [auto] : [];
+    if (!use.length) throw new SumitError('לא נמצאה תיקיית לקוחות בסאמיט. בחר תיקיות במסך הלקוחות. התיקיות שנמצאו: ' + (folders.map(f => f.name).join(', ') || 'אין'));
+    const folder = { id: use.map(f => f.id).join(','), name: use.map(f => f.name).join(', ') };
     const fetchAll = async folderParam => {
       const ents = [];
       for (let page = 0, start = 0, more = true; more && page < 300; page++) {
-        const d = await sumitCall('/crm/data/listentities/', { Folder: folderParam, IncludeInheritedFolders: false, Filters: [], Order: null, Paging: { StartIndex: start, PageSize: 100 }, LoadProperties: true }, user, 'cust list ' + start);
+        const d = await sumitCall('/crm/data/listentities/', { Folder: folderParam, IncludeInheritedFolders: true, Filters: [], Order: null, Paging: { StartIndex: start, PageSize: 100 }, LoadProperties: true }, user, 'cust list ' + start);
         const got = d.Entities || []; got.forEach(x => ents.push(x)); start += got.length; more = !!d.HasNextPage && got.length > 0;
       }
       return ents;
     };
-    let ents;
-    try { ents = await fetchAll(String(folder.id)); } catch (e) { ents = await fetchAll(folder.name); }
+    const perFolder = [], seenIds = new Set(), ents = [];
+    for (const f of use) {
+      let list; try { list = await fetchAll(String(f.id)); } catch (e) { list = await fetchAll(f.name); }
+      perFolder.push({ id: f.id, name: f.name, count: list.length });
+      list.forEach(x => { const k = String(x.ID); if (!seenIds.has(k)) { seenIds.add(k); ents.push(x); } });
+    }
     const customers = await readCollection(ROOT + '/customers');
     const idx = { sumit: {}, cn: {}, email: {}, phone: {}, name: {} };
     const index = c => {
@@ -814,24 +824,27 @@ async function syncCustomersFromSumit(user, folderHint) {
       const n = normName(c.name); if (n) idx.name[n] = c;
     };
     Object.values(customers).forEach(index);
-    const stats = { found: ents.length, newCustomers: 0, updated: 0, linked: 0, unchanged: 0, folder: folder.name, sampleKeys: [] };
+    const stats = { found: ents.length, newCustomers: 0, updated: 0, linked: 0, unchanged: 0, folder: folder.name, perFolder, sampleKeys: [], fallbackNames: [] };
     if (ents[0]) stats.sampleKeys = Object.keys(ents[0].Properties || {}).slice(0, 40);
     let mappedNames = 0;
     for (const en of ents) {
       const m = mapCustomerProps(en.Properties);
       if (m.name) mappedNames++;
+      else {
+        m.name = m.company || m.contact || m.email || m.phone || ('לקוח ' + en.ID);
+        if (stats.fallbackNames.length < 30) stats.fallbackNames.push({ id: en.ID, name: m.name, keys: Object.keys(en.Properties || {}).slice(0, 25).map(k => k + '=' + firstVal(en.Properties[k]).slice(0, 40)) });
+      }
       const sid = en.ID != null ? String(en.ID) : '';
       let c = (sid && idx.sumit[sid]) || (digits(m.companyNumber).length >= 5 && idx.cn[digits(m.companyNumber)]) || (m.email && idx.email[m.email.toLowerCase()]) || (digits(m.phone).length >= 9 && idx.phone[digits(m.phone).slice(-9)]) || (m.name && idx.name[normName(m.name)]) || null;
       if (c && c.sumitId != null && c.sumitId !== '' && sid && String(c.sumitId) !== sid) c = null;
       if (!c) {
-        if (!m.name) continue;
         c = { id: 'c' + crypto.randomBytes(6).toString('hex'), name: m.name, companyNumber: m.companyNumber || '', contact: m.contact || '', phone: m.phone || '', email: m.email || '', city: m.city || '', address: m.address || '', zip: m.zip || '', notes: '', sumitId: en.ID, source: 'sumit', created: Date.now(), updated: Date.now() };
         await writeDoc(ROOT + '/customers/' + c.id, c, user && user.id); index(c); stats.newCustomers++; continue;
       }
       const before = JSON.stringify(c);
       const wasLinked = c.sumitId != null && c.sumitId !== '';
       if (!wasLinked && sid) c.sumitId = en.ID;
-      for (const f of ['name', 'companyNumber', 'phone', 'email', 'city', 'address', 'zip', 'contact']) if (m[f] && m[f] !== c[f]) c[f] = m[f];
+      for (const f of ['name', 'companyNumber', 'phone', 'email', 'city', 'address', 'zip', 'contact']) if (m[f] && m[f] !== c[f] && !(f === 'name' && !mapCustomerProps(en.Properties).name)) c[f] = m[f];
       if (JSON.stringify(c) !== before) { c.updated = Date.now(); await writeDoc(ROOT + '/customers/' + c.id, c, user && user.id); index(c); if (!wasLinked) stats.linked++; else stats.updated++; }
       else stats.unchanged++;
     }
@@ -846,7 +859,14 @@ async function syncCustomersFromSumit(user, folderHint) {
   return custSyncRunning;
 }
 app.post('/api/sumit/synccustomers', auth, csrf, express.json({ limit: '10kb' }), async (req, res, next) => {
-  try { res.json(await syncCustomersFromSumit(req.user, req.body && req.body.folder)); } catch (e) { next(e); }
+  try { const b = req.body || {}; res.json(await syncCustomersFromSumit(req.user, b.folder, Array.isArray(b.folders) ? b.folders : undefined)); } catch (e) { next(e); }
+});
+app.get('/api/sumit/custfolders', auth, async (req, res, next) => {
+  try {
+    const fl = await sumitCall('/crm/schema/listfolders/', { NameFilter: null }, req.user, 'cust folders');
+    const cfg = (await pool.query('SELECT data FROM docs WHERE path = $1', [CUST_CFG_DOC])).rows[0];
+    res.json({ folders: (fl.Folders || []).map(f => ({ id: f.ID, name: String(f.Name || '') })), selected: cfg ? cfg.data.folders || [] : [] });
+  } catch (e) { next(e); }
 });
 app.get('/api/sumit/synccuststatus', auth, async (req, res, next) => {
   try { const r = await pool.query('SELECT data FROM docs WHERE path = $1', [SYNC_CUST_DOC]); res.json(r.rows[0] ? r.rows[0].data : null); } catch (e) { next(e); }

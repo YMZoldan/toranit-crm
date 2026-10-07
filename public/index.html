@@ -2361,9 +2361,21 @@ function renderCustomers(pg){
     const show = r => { if (!r){ st.textContent = 'הסנכרון מושך מסאמיט את כל כרטיסי הלקוח, גם לקוחות בלי מסמכים, ומעדכן טלפון, מייל, ח.פ וכתובת.'; return; }
       if (!r.ok){ st.innerHTML = '<span style="color:var(--danger)">הסנכרון האחרון נכשל ('+tsDate(r.at)+'): '+esc(r.error || '')+'</span>'; return; }
       const S = r.stats;
-      st.innerHTML = 'סנכרון לקוחות אחרון: '+tsDate(r.at)+' '+new Date(r.at).toTimeString().slice(0,5)+' · תיקייה "'+esc(S.folder)+'" · '+S.found+' בסאמיט, '+S.newCustomers+' חדשים, '+S.linked+' קושרו, '+S.updated+' עודכנו. מתבצע גם אוטומטית כל שעה.'+
+      st.innerHTML = 'סנכרון לקוחות אחרון: '+tsDate(r.at)+' '+new Date(r.at).toTimeString().slice(0,5)+' · '+(S.perFolder && S.perFolder.length ? S.perFolder.map(f => '"'+esc(f.name)+'": '+f.count).join(', ') : 'תיקייה "'+esc(S.folder)+'"')+' · '+S.found+' בסאמיט, '+S.newCustomers+' חדשים, '+S.linked+' קושרו, '+S.updated+' עודכנו. מתבצע גם אוטומטית כל שעה. <a href="#" id="cuFolders">בחר תיקיות</a>'+
+        (S.fallbackNames && S.fallbackNames.length ? '<details style="margin-top:6px"><summary>'+S.fallbackNames.length+' לקוחות בלי שם בסאמיט קיבלו שם חלופי</summary><div class="tblw"><table class="tbl"><thead><tr><th>מספר בסאמיט</th><th>השם שניתן</th><th>השדות שהגיעו</th></tr></thead><tbody>'+S.fallbackNames.map(x => '<tr><td>'+esc(String(x.id))+'</td><td>'+esc(x.name)+'</td><td class="psub" style="direction:ltr;text-align:right">'+esc((x.keys || []).join(' · '))+'</td></tr>').join('')+'</tbody></table></div></details>' : '')+
         (S.found && !S.mappedNames ? '<div class="warnbox" style="margin-top:6px">לא זוהו שמות לקוחות בנתונים שהגיעו מסאמיט. שלח את הרשימה הזו למי שמתחזק את המערכת: '+esc((S.sampleKeys || []).join(', '))+'</div>' : ''); };
-    sumitApi.syncCustStatus().then(show).catch(() => {});
+    sumitApi.syncCustStatus().then(r => { show(r); bindFolders(); }).catch(() => {});
+    const bindFolders = () => { const a = st.querySelector('#cuFolders'); if (!a) return; a.addEventListener('click', async e => { e.preventDefault();
+      let data; try { data = await sumitApi.custFolders(); } catch(err){ pgMsg('לא הצלחתי לטעון את התיקיות מסאמיט: '+esc((err && err.message) || ''), true); return; }
+      const sel = new Set((data.selected || []).map(String)), m = openModal2('<div class="pghead"><h2 style="margin:0">תיקיות לקוחות בסאמיט</h2><button id="cfX" aria-label="סגור">✕</button></div>'+
+        '<p class="muted" style="margin-bottom:8px">סמן את כל התיקיות שיש בהן לקוחות. הסנכרון כולל גם את תתי־התיקיות שלהן. בלי סימון, נבחרת אוטומטית תיקיית "לקוחות".</p>'+
+        '<div style="display:flex;flex-direction:column;gap:6px;max-height:50vh;overflow:auto">'+data.folders.map(f => '<label class="chk"><input type="checkbox" data-cf="'+esc(String(f.id))+'"'+(sel.has(String(f.id)) || (!sel.size && /^לקוחות$/.test(f.name.trim())) ? ' checked' : '')+'> '+esc(f.name)+' <span class="psub">#'+esc(String(f.id))+'</span></label>').join('')+'</div>'+
+        '<div class="btns"><button class="primary" id="cfGo">שמור וסנכרן</button></div>');
+      m.querySelector('#cfX').addEventListener('click', closeModal2);
+      m.querySelector('#cfGo').addEventListener('click', async ev => { const ids = [...m.querySelectorAll('[data-cf]:checked')].map(i => i.dataset.cf); if (!ids.length){ alert('סמן לפחות תיקייה אחת.'); return; }
+        ev.target.disabled = true; ev.target.textContent = 'מסנכרן...';
+        try { const r = await sumitApi.syncCustomers(null, ids); closeModal2(); await refreshCrm(); renderCustomers(pg); pgMsg('סנכרון הלקוחות הסתיים: '+r.stats.found+' לקוחות מ־'+ids.length+' תיקיות, '+r.stats.newCustomers+' חדשים.'); }
+        catch(err){ ev.target.disabled = false; ev.target.textContent = 'שמור וסנכרן'; alert((err && err.message) || 'הסנכרון נכשל'); } }); }); };
     $('#cuSyncAll').addEventListener('click', async e => {
       const b = e.target; b.disabled = true; b.textContent = 'מסנכרן...'; pgMsg('מושך את כל הלקוחות מסאמיט...');
       try { const r = await sumitApi.syncCustomers(); await refreshCrm(); renderCustomers(pg); pgMsg('סנכרון הלקוחות הסתיים: '+r.stats.found+' לקוחות בסאמיט, '+r.stats.newCustomers+' חדשים, '+r.stats.linked+' קושרו, '+r.stats.updated+' עודכנו.'); }
@@ -4222,7 +4234,7 @@ async function makeDealProposal(d){
 }
 
 /* ---------- navigation chrome & mobile tables ---------- */
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.13.1';
 document.querySelectorAll('.appver').forEach(e => { e.textContent = APP_VERSION; });
 function labelTables(root){
   (root || document).querySelectorAll('table.tbl').forEach(tb => {
