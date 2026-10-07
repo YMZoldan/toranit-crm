@@ -2,9 +2,9 @@
 
 ## הדרך המהירה: שרת חדש (Kamatera או כל שרת Ubuntu)
 ```bash
-scp cameras-v1.13.1.zip root@SERVER-IP:/root/   # מהמחשב, ב-PowerShell
+scp cameras-v1.15.0.zip root@SERVER-IP:/root/   # מהמחשב, ב-PowerShell
 ssh root@SERVER-IP                             # התחברות לשרת
-apt-get install -y unzip && unzip -o cameras-v1.13.1.zip && bash cameras/install.sh
+apt-get install -y unzip && unzip -o cameras-v1.15.0.zip && bash cameras/install.sh
 ```
 הסקריפט שואל דומיין, אימייל וסיסמה, ומתקין: עדכונים, חומת אש, fail2ban, Docker,
 Traefik עם תעודת HTTPS, את האפליקציה, וגיבוי לילי. מריצים אותו שוב לעדכון גרסה.

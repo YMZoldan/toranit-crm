@@ -36,4 +36,34 @@ chrome.downloads.onChanged.addListener(async delta => {
   try { await sendToCrm(cfg, sup, item.finalUrl || item.url, name); await addLog({ ok: true, supplier: sup.name, file: name }); notify('המחירון של ' + sup.name + ' נשלח ל-CRM', name); }
   catch (e) { await addLog({ ok: false, supplier: sup.name, file: name, error: e.message }); notify('המחירון של ' + sup.name + ' לא נשלח', e.message); }
 });
-chrome.runtime.onInstalled.addListener(d => { if (d.reason === 'install') chrome.runtime.openOptionsPage(); });
+chrome.runtime.onInstalled.addListener(d => { if (d.reason === 'install') chrome.runtime.openOptionsPage(); registerPages(); });
+chrome.runtime.onStartup.addListener(registerPages);
+chrome.storage.onChanged.addListener(ch => { if (ch.suppliers) registerPages(); });
+async function registerPages() {
+  const cfg = await getCfg(), builtin = ['b-tech.co.il', 'morlevi.co.il', 'grandadvance.co.il'];
+  const extra = (cfg.suppliers || []).map(s => String(s.domain || '').toLowerCase()).filter(d => d && !builtin.includes(d));
+  try { await chrome.scripting.unregisterContentScripts({ ids: ['toranit-extra'] }); } catch (e) {}
+  if (!extra.length) return;
+  const matches = extra.map(d => 'https://*.' + d + '/*');
+  if (!(await chrome.permissions.contains({ origins: matches }))) return;
+  try { await chrome.scripting.registerContentScripts([{ id: 'toranit-extra', matches, js: ['content.js'], runAt: 'document_idle' }]); } catch (e) {}
+}
+chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  (async () => {
+    const cfg = await getCfg();
+    if (msg.type === 'cfg') { const sup = supplierFor(cfg, [sender.url || '']); return reply({ key: !!cfg.key, supplier: sup ? sup.name : hostOf(sender.url || ''), vatIncl: cfg.vatIncl || {}, vatRate: cfg.vatRate || 18 }); }
+    if (!cfg.key) return reply({ ok: false, error: 'לא הוגדר מפתח' });
+    const call = async (path, opt) => { const r = await fetch(crmBase(cfg) + path, Object.assign({ headers: { Authorization: 'Bearer ' + cfg.key, 'Content-Type': 'application/json' } }, opt || {})); const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.message || ('שגיאה ' + r.status)); return j; };
+    if (msg.type === 'deals') { try { return reply({ ok: true, deals: await call('/api/ext/deals'), last: cfg.lastDeal || '' }); } catch (e) { return reply({ ok: false, error: e.message }); } }
+    if (msg.type === 'product') {
+      try {
+        const res = await call('/api/ext/product', { method: 'POST', body: JSON.stringify(msg.body) });
+        const vatIncl = Object.assign({}, cfg.vatIncl || {}); vatIncl[msg.body.supplier] = !!msg.vat;
+        await chrome.storage.local.set({ vatIncl, lastDeal: msg.body.dealId || '' });
+        await addLog({ ok: true, supplier: msg.body.supplier, file: 'מוצר: ' + msg.body.name.slice(0, 60) });
+        return reply({ ok: true, res });
+      } catch (e) { return reply({ ok: false, error: e.message }); }
+    }
+  })();
+  return true;
+});

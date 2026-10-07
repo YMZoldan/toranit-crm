@@ -439,6 +439,8 @@ function normCatalog(c){
   c.billing = Object.assign({termsDays:30}, c.billing || {});
   c.sales = Object.assign({defMargin:20, margins:{laptop:12, desktop:12, aio:12, monitor:18, printer:18, network:22, storage:20, component:20, peripheral:30, ups:22, software:25, other:20}, warranty:{laptop:36, desktop:36, aio:36, monitor:36, printer:12, network:24, storage:36, component:36, peripheral:12, ups:24, software:0, other:12}}, c.sales || {});
   c.sales.margins = Object.assign({}, c.sales.margins); c.sales.warranty = Object.assign({}, c.sales.warranty); c.sales.bundles = Array.isArray(c.sales.bundles) ? c.sales.bundles : [];
+  if (Array.isArray(c.sales.sites)) c.sales.sites.forEach(x => { if (x && /morlevi\.co\.il\/?$/.test(String(x.url || '').trim())) x.url = 'https://www.morlevi.co.il/cat/0?keyword={q}'; });
+  c.sales.sites = Array.isArray(c.sales.sites) ? c.sales.sites : [{name:'ביטק', url:'https://b-tech.co.il/?s={q}&post_type=product'}, {name:'מורלוי', url:'https://www.morlevi.co.il/cat/0?keyword={q}'}, {name:'גרנד אדוונס', url:'https://grandadvance.co.il/heb/'}];
   c.sumit.types = Object.assign({quote:null, payreq:null, receipt:null, invrec:null, invoice:null}, c.sumit.types || {});
   Object.keys(c.sumit.types).forEach(k => { const v = c.sumit.types[k]; const m = typeof v === 'string' ? /\((-?\d+)\)\s*$/.exec(v) : null; if (m) c.sumit.types[k] = +m[1]; });
   (c.sumit.typeList || []).forEach(t => { const m = typeof t.value === 'string' ? /^(.*?)\s*\((-?\d+)\)\s*$/.exec(t.value) : null; if (m){ t.value = +m[2]; t.name = t.name && !/\(\d+\)/.test(t.name) ? t.name : m[1]; } });
@@ -1822,6 +1824,7 @@ function renderCatalog(pg){
     '<div class="btns" style="margin:0"><button id="kExport">העתק מחירון לגיבוי</button><label class="chk" style="font-size:13.5px">טען מחירון <input type="file" id="kImport" accept=".json,application/json,text/plain"></label></div></div><div id="pgMsg"></div>';
   h += card('מחירוני ספקים', '<div id="plBox"></div>');
   if (cloud) h += card('תוסף כרום למחירונים', '<div id="extBox"></div>');
+  h += card('אתרי ספקים לחיפוש', '<p class="muted" style="margin-bottom:8px">כפתורי "חפש באתר" בקטלוג ובהזמנות פותחים את האתרים האלה. אם בכתובת יש {q}, מה שחיפשת נכנס במקומו. אם אין, התוסף ממלא את תיבת החיפוש של האתר ושולח לבד. בדף מוצר באתר, הכפתור "הוסף ל־Toranit" של התוסף שולח את המוצר לקטלוג ולהזמנה.</p><div class="tblw"><table class="tbl"><thead><tr><th>ספק</th><th>כתובת חיפוש</th><th></th></tr></thead><tbody>'+cat.sales.sites.map((x, i) => '<tr><td><input type="text" data-b="sales.sites.'+i+'.name"></td><td><input type="text" data-b="sales.sites.'+i+'.url" style="direction:ltr;min-width:280px"></td><td><button class="sm danger" data-del="sales.sites.'+i+'" aria-label="מחק">✕</button></td></tr>').join('')+'</tbody></table></div><div class="btns"><button data-add="sales.sites">הוסף אתר</button></div>');
   h += card('תמונות מוצרים (Icecat)', '<p class="muted" style="margin-bottom:8px">התמונות נמשכות מ־Icecat לפי היצרן ומק״ט היצרן. חשבון ההדגמה <span style="direction:ltr;unicode-bidi:isolate">openIcecat-live</span> עובד מיד. לשימוש קבוע, הירשם בחינם ב־icecat.biz (Open Icecat) והזן כאן את שם המשתמש.</p><div class="frm"><label>שם משתמש Icecat<input type="text" data-b="sales.icecatUser" placeholder="openIcecat-live" style="direction:ltr"></label></div>');
   h += card('מכירות מחשוב: רווח ואחריות לפי קטגוריה', '<p class="muted" style="margin-bottom:8px">אחוז הרווח קובע את המחיר ללקוח כשמוסיפים מוצר מהקטלוג. האחריות היא ברירת המחדל בתיק הציוד, אם המחירון לא מציין אחרת.</p><div class="tblw"><table class="tbl"><thead><tr><th>קטגוריה</th><th>רווח (%)</th><th>אחריות (חודשים)</th></tr></thead><tbody>'+Object.keys(PCAT).filter(k => k !== 'service' && k !== 'camera').map(k => '<tr><td>'+PCAT[k]+'</td><td><input type="number" min="0" step="any" data-num data-b="sales.margins.'+k+'" style="width:70px"></td><td><input type="number" min="0" step="1" data-num data-b="sales.warranty.'+k+'" style="width:70px"></td></tr>').join('')+'</tbody></table></div>');
   h += card('חיבור לסאמיט', '<div id="suBox"></div>');
@@ -1859,9 +1862,10 @@ function renderCatalog(pg){
   bindAll(pg, () => cat, el => { saveCat(); if ('re' in el.dataset) renderCatalog(pg); });
   pg.querySelectorAll('[data-re-blur]').forEach(el => el.addEventListener('change', () => renderCatalog(pg)));
   renderSumitBox(); renderPlBox(); renderExtBox(); processInbox().then(d => { if (d && d.length) renderInbox(); });
-  pg.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { const [k,i] = b.dataset.del.split('.'); cat[k].splice(+i,1); saveCat(); renderCatalog(pg); }));
+  const arrAt = path => path.split('.').reduce((o, k) => o && o[k], cat);
+  pg.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { const parts = b.dataset.del.split('.'), i = +parts.pop(), arr = arrAt(parts.join('.')); if (Array.isArray(arr)) arr.splice(i, 1); saveCat(); renderCatalog(pg); }));
   pg.querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', () => { const k = b.dataset.add;
-    cat[k].push(k === 'cameras' ? {id:uid('c'), brand:'', model:'', lens:'', res:'', kind:'', fov:90, range:10, cost:0} : k === 'conduits' ? {id:uid('d'), name:'', cost:0} : k === 'counters' ? {id:uid('n'), name:''} : {id:uid('i'), name:'', unit:'יח׳', cost:0, base:'', per:1});
+    arrAt(k).push(k === 'cameras' ? {id:uid('c'), brand:'', model:'', lens:'', res:'', kind:'', fov:90, range:10, cost:0} : k === 'conduits' ? {id:uid('d'), name:'', cost:0} : k === 'counters' ? {id:uid('n'), name:''} : k === 'sales.sites' ? {name:'', url:'https://'} : {id:uid('i'), name:'', unit:'יח׳', cost:0, base:'', per:1});
     saveCat(); renderCatalog(pg); }));
   $('#kApply').addEventListener('click', () => { state.pricing.profitEq = +cat.defaults.profitEq||0; state.pricing.profitLab = +cat.defaults.profitLab||0; save(); pgMsg('אחוזי הרווח עודכנו בפרויקט "'+esc(state.name)+'".'); });
   $('#kExport').addEventListener('click', () => showText(JSON.stringify(cat), 'המחירון הועתק. שמור אותו בקובץ טקסט כגיבוי.', '#pgMsg'));
@@ -3051,7 +3055,13 @@ async function loadPriceLists(force){
     b.docs.forEach(d => { const x = d.data(); if (!out.lists[x.listId]) return; (out.items[x.listId] = out.items[x.listId] || []).push([x.n || 0, x.items || []]); });
     Object.keys(out.items).forEach(k => { out.items[k] = out.items[k].sort((p,q) => p[0] - q[0]).flatMap(p => clone(p[1])); });
   } else { try { const r = JSON.parse(lsGet('tcp2-pricelists') || 'null'); if (r && r.lists) Object.assign(out, r); } catch(e) {} }
-  priceLists = out; return out;
+  priceLists = out; await loadWebItems(); return out;
+}
+async function loadWebItems(){
+  if (!priceLists) return;
+  const web = [];
+  if (cloud){ try { const w = await cloud.root.collection('webitems').get(); w.docs.forEach(d => web.push(clone(d.data()))); } catch(e) {} }
+  priceLists.web = web;
 }
 function chunkItems(items){
   const out = []; let cur = [], size = 0;
@@ -3075,7 +3085,8 @@ async function deletePriceList(id){
   delete priceLists.lists[id]; delete priceLists.items[id];
   if (!cloud) lsSet('tcp2-pricelists', JSON.stringify(priceLists));
 }
-const allPlItems = () => Object.keys(priceLists.items).flatMap(id => (priceLists.items[id] || []).map(x => Object.assign({list:id, sup:(priceLists.lists[id] || {}).supplier || ''}, x)));
+const allPlItems = () => Object.keys(priceLists.items).flatMap(id => (priceLists.items[id] || []).map(x => Object.assign({list:id, sup:(priceLists.lists[id] || {}).supplier || '', lat:(priceLists.lists[id] || {}).created || 0}, x)))
+  .concat((priceLists.web || []).map(x => Object.assign({}, x, {list:'web', web:true, lat:x.at || 0})));
 
 /* classification */
 function kindsIn(t){ const out = []; [['ptz',/ptz|ממונעת|speed\s*dome/i],['fisheye',/fish\s*eye|fisheye|360|פנורמ|עין דג/i],['covert',/מוסלק|נסתרת|פינהול|pinhole|covert/i],['turret',/turret|טורט|eyeball/i],['bullet',/bullet|צינור|צילינדר/i],['dome',/\bdome\b|כיפה|כיפת|כיפות/i]].forEach(([k, re]) => { if (re.test(t)) out.push(k); }); return out; }
@@ -3530,13 +3541,15 @@ function productGroups(){
     g.items.push(x);
     if (!g.name || (x.n && x.n.length > g.name.length)) g.name = x.n;
   });
-  Object.values(groups).forEach(g => { g.items.sort((a, b) => (a.np - b.np) || a.p - b.p); g.best = g.items.find(i => !i.np) || g.items[0]; g.cat = itCat(g.best); g.mp = g.items.map(i => i.mp).find(Boolean) || ''; });
+  Object.values(groups).forEach(g => {
+    const bySup = {}; g.items.forEach(i => { const k = i.sup; if (!bySup[k] || (i.lat || 0) > (bySup[k].lat || 0)) bySup[k] = i; }); g.items = Object.values(bySup);
+    g.items.sort((a, b) => (a.np - b.np) || a.p - b.p); g.best = g.items.find(i => !i.np) || g.items[0]; g.cat = itCat(g.best); g.mp = g.items.map(i => i.mp).find(Boolean) || ''; });
   return Object.values(groups);
 }
 async function renderProducts(pg){
   pg = pg || $('#page'); if (viewMode !== 'products') return;
   pg.innerHTML = '<div class="pg"><p class="muted">טוען מחירונים...</p></div>';
-  try { await loadPriceLists(); await loadPimages(); } catch(e) {}
+  try { await loadPriceLists(); await loadWebItems(); await loadPimages(true); } catch(e) {}
   if (viewMode !== 'products') return;
   const sups = Object.values(priceLists.lists);
   const openDeals = Object.values(deals).filter(d => d.stage === 'draft' || d.stage === 'quote').sort((a, b) => b.updated - a.updated);
@@ -3547,7 +3560,7 @@ async function renderProducts(pg){
   h += '<div class="card"><div class="dfilter"><input type="text" id="prQ" placeholder="חיפוש: דגם, מק״ט, i5, 16GB, 27 אינץ׳..." style="flex:1;min-width:220px">'+
     '<select id="prCat"><option value="">כל הקטגוריות</option>'+Object.keys(PCAT).map(k => '<option value="'+k+'">'+PCAT[k]+'</option>').join('')+'</select>'+
     (sups.length > 1 ? '<select id="prSup"><option value="">כל הספקים</option>'+sups.map(m => '<option value="'+m.id+'">'+esc(m.supplier)+'</option>').join('')+'</select>' : '')+
-    '<label class="chk"><input type="checkbox" id="prStock"> רק במלאי</label></div><div id="prList"></div></div>'+card('חבילות קבועות', '<div id="bnBox"></div>')+'</div>';
+    '<label class="chk"><input type="checkbox" id="prStock"> רק במלאי</label></div><div style="margin:2px 0 8px">'+siteButtons()+'</div><div id="prList"></div></div>'+card('חבילות קבועות', '<div id="bnBox"></div>')+'</div>';
   pg.innerHTML = h;
   const G = productGroups();
   $('#prQ').value = prQ; $('#prCat').value = prCat; if ($('#prSup')) $('#prSup').value = prSup; $('#prStock').checked = prStock;
@@ -3556,8 +3569,17 @@ async function renderProducts(pg){
   if ($('#prSup')) $('#prSup').addEventListener('change', e => { prSup = e.target.value; prOpen = null; drawProducts(G); });
   $('#prStock').addEventListener('change', e => { prStock = e.target.checked; drawProducts(G); });
   $('#prTarget').addEventListener('change', e => { prTarget = e.target.value; });
+  bindSiteButtons(pg, () => prQ);
   if ($('#prImgs')) $('#prImgs').addEventListener('click', () => { const words = prQ.trim().toLowerCase().split(/\s+/).filter(Boolean); const vis = G.filter(g => (!prCat || g.cat === prCat) && (!words.length || words.every(w => (g.name + ' ' + g.key).toLowerCase().includes(w)))); findAllImages(vis, () => drawProducts(G)); });
   drawProducts(G); renderBundles();
+}
+function siteButtons(q, cls){
+  const S = (cat.sales.sites || []).filter(x => x.url && x.name);
+  return S.length ? '<span class="'+(cls || '')+'" style="display:inline-flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="muted" style="font-size:13px">חפש באתר:</span>'+S.map((x, i) => '<button class="sm" data-site="'+i+'">'+esc(x.name)+'</button>').join('')+'</span>' : '';
+}
+function bindSiteButtons(root, getQ){
+  root.querySelectorAll('[data-site]').forEach(b => b.addEventListener('click', () => { const x = (cat.sales.sites || [])[+b.dataset.site]; if (!x) return; const q = String(getQ() || '').trim();
+    const u = x.url.includes('{q}') ? x.url.replace('{q}', encodeURIComponent(q)) : (q ? x.url.replace(/#.*$/, '') + '#toranit-q=' + encodeURIComponent(q) : x.url); window.open(u, '_blank', 'noopener'); }));
 }
 const inStock = x => { const q = String(x.q || '').trim(); if (!q) return null; const n = parseNum(q); if (n != null) return n > 0; return !/אזל|אין|out|0\b|לא במלאי|הזמנה/i.test(q); };
 function drawProducts(G){
@@ -3570,7 +3592,7 @@ function drawProducts(G){
   el.innerHTML = '<p class="muted" style="margin:0 0 4px">'+list.length+' מוצרים. לחיצה על שורה מציגה את כל הספקים ואת הפרטים.</p><div class="tblw"><table class="tbl"><thead><tr><th></th><th>מוצר</th><th>קטגוריה</th><th>ספקים</th><th>מחיר הכי טוב</th><th>ללקוח</th><th>כמות</th><th></th></tr></thead><tbody>'+
     list.slice(0, 200).map((g, i) => { const b = g.best, sp = b.np ? 0 : sellPrice(b.p, g.cat);
       return '<tr data-pg="'+i+'" style="cursor:pointer"><td style="width:52px"><span data-pimg="'+i+'" title="תמונת מוצר" style="cursor:pointer">'+thumb(g.key, 44)+'</span></td><td><b>'+esc(g.name)+'</b><div class="psub" style="direction:ltr;text-align:right">'+esc(g.mp || b.s || '')+(b.b ? ' · '+esc(b.b) : '')+'</div></td><td class="psub">'+PCAT[g.cat]+'</td>'+
-        '<td>'+g.items.length+'<div class="psub">'+esc([...new Set(g.items.map(x => x.sup))].join(', '))+'</div></td><td class="n">'+(b.np ? 'לפי פנייה' : money(b.p))+'<div class="psub">'+esc(b.sup)+(inStock(b) === false ? ' · אין במלאי' : '')+'</div></td>'+
+        '<td>'+g.items.length+'<div class="psub">'+esc([...new Set(g.items.map(x => x.sup))].join(', '))+(g.items.some(x => x.web) ? ' · מהאתר' : '')+'</div></td><td class="n">'+(b.np ? 'לפי פנייה' : money(b.p))+'<div class="psub">'+esc(b.sup)+(inStock(b) === false ? ' · אין במלאי' : '')+'</div></td>'+
         '<td class="n">'+(b.np ? '—' : money(sp))+'</td><td><input type="number" min="1" value="1" data-pq="'+i+'" style="width:56px"></td><td><button class="sm primary" data-pa="'+i+'">הוסף</button></td></tr>'+
         (prOpen === i ? '<tr class="sec"><td colspan="8" style="font-weight:400"><div style="display:flex;gap:16px;align-items:flex-start"><span data-pimg="'+i+'" style="cursor:pointer">'+thumb(g.key, 140)+'</span><div style="flex:1;min-width:0">'+productDetails(g)+'</div></div></td></tr>' : ''); }).join('')+'</tbody></table></div>'+
     (list.length > 200 ? '<p class="muted">מוצגים 200 הזולים. צמצם בחיפוש.</p>' : '');
@@ -3582,7 +3604,7 @@ function drawProducts(G){
 function productDetails(g){
   const i0 = G_index(g);
   let h = '<table class="tbl" style="margin-bottom:6px"><thead><tr><th>ספק</th><th>מק״ט ספק</th><th>עלות</th><th>מלאי</th><th>אחריות</th><th></th></tr></thead><tbody>'+
-    g.items.map((x, j) => '<tr><td>'+esc(x.sup)+'</td><td style="direction:ltr;text-align:right">'+esc(x.s || x.code || '')+'</td><td class="n">'+(x.np ? 'לפי פנייה' : money(x.p))+'</td><td>'+esc(x.q || '—')+'</td><td>'+(x.wm ? x.wm + ' חודשים' : '—')+'</td>'+
+    g.items.map((x, j) => '<tr><td>'+esc(x.sup)+(x.web ? '<div class="psub">מהאתר, '+tsDate(x.at)+(x.url ? ' · <a href="'+esc(x.url)+'" target="_blank" rel="noopener">לדף המוצר</a>' : '')+'</div>' : '')+'</td><td style="direction:ltr;text-align:right">'+esc(x.s || x.code || '')+'</td><td class="n">'+(x.np ? 'לפי פנייה' : money(x.p))+'</td><td>'+esc(x.q || '—')+'</td><td>'+(x.wm ? x.wm + ' חודשים' : '—')+'</td>'+
       '<td><button class="sm" data-pai="'+i0+':'+j+'">הוסף מספק זה</button></td></tr>').join('')+'</tbody></table>';
   const specs = (g.best.d || []).filter(s => s[1]);
   if (specs.length) h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px 18px;font-size:13px">'+specs.map(s => '<div><span class="muted">'+esc(s[0])+':</span> '+esc(s[1])+'</div>').join('')+'</div>';
@@ -3635,6 +3657,8 @@ function drawDeals(){
 }
 let dlTimer = null, dlDelArm = false;
 function renderDeal(pg, d){
+  const pending = (d.lines || []).filter(l => l.price == null);
+  if (pending.length){ pending.forEach(l => { l.cat = l.cat || itCat({n:l.name, s:l.mp}); l.price = +l.cost ? sellPrice(+l.cost, l.cat) : 0; if (l.warr == null) l.warr = warrOf(l.cat); }); putDeal(d).catch(() => {}); }
   const c = customers[d.customerId], t = dealTotals(d), custList = Object.values(customers).filter(x => !x._new && x.name).sort((a, b) => a.name.localeCompare(b.name, 'he'));
   let h = '<div class="pg"><div class="pghead"><div><a href="#" id="dlBack">→ כל ההזמנות</a><h2 style="margin:4px 0 0">הזמנה #'+d.number+(c ? ' · '+esc(c.name) : '')+'</h2><p class="muted">נפתחה '+tsDate(d.created)+' · '+STAGES[d.stage]+'</p></div>'+
     '<div class="btns" style="margin:0">'+(sumitReady() ? '<button class="primary" id="dlQuote">הצעת מחיר דרך סאמיט</button><button id="dlPay">דרישת תשלום</button><button id="dlInv">חשבונית מס קבלה</button>' : '')+
@@ -3649,7 +3673,7 @@ function renderDeal(pg, d){
     (d.lines || []).map((l, i) => '<tr><td><div style="display:flex;gap:8px;align-items:center">'+(l.cat === 'service' ? '' : thumb(l.key, 36))+'<div style="flex:1;min-width:0"><input type="text" data-b="lines.'+i+'.name"><div class="psub" style="direction:ltr;text-align:right">'+esc(l.mp || l.sku || '')+'</div></div></div></td><td class="psub">'+esc(l.sup || 'ידני')+'</td>'+
       '<td><input type="number" min="0" step="1" data-num data-b="lines.'+i+'.qty" style="width:60px"></td><td><input type="number" min="0" step="any" data-num data-b="lines.'+i+'.cost"></td><td><input type="number" min="0" step="any" data-num data-b="lines.'+i+'.price"></td>'+
       '<td><input type="number" min="0" step="1" data-num data-b="lines.'+i+'.warr" style="width:60px"></td><td class="n" data-lt="'+i+'">'+money((+l.price || 0) * (+l.qty || 0))+'</td><td><button class="sm danger" data-rl="'+i+'" aria-label="מחק שורה">✕</button></td></tr>').join('')+'</tbody></table></div>'+
-    '<div class="btns"><button id="dlAddCat" class="primary">הוסף מהקטלוג</button>'+((cat.sales.bundles || []).length ? '<select id="dlBn"><option value="">הוסף חבילה...</option>'+cat.sales.bundles.map((b, i) => '<option value="'+i+'">'+esc(b.name)+'</option>').join('')+'</select>' : '')+'<button id="dlAddSvc">הוסף שירות / שורה חופשית</button><button id="dlSaveBn">שמור כחבילה</button><button id="dlReprice" title="עדכון עלויות מהמחירונים הנוכחיים">עדכן מחירים מהמחירונים</button></div><div id="dlTot"></div>';
+    '<div class="btns" style="align-items:center"><button id="dlAddCat" class="primary">הוסף מהקטלוג שלי</button><input type="text" id="dlSiteQ" placeholder="מה לחפש באתר הספק" style="max-width:200px">'+siteButtons()+'</div><div class="btns">'+((cat.sales.bundles || []).length ? '<select id="dlBn"><option value="">הוסף חבילה...</option>'+cat.sales.bundles.map((b, i) => '<option value="'+i+'">'+esc(b.name)+'</option>').join('')+'</select>' : '')+'<button id="dlAddSvc">הוסף שירות / שורה חופשית</button><button id="dlSaveBn">שמור כחבילה</button><button id="dlReprice" title="עדכון עלויות מהמחירונים הנוכחיים">עדכן מחירים מהמחירונים</button></div><div id="dlTot"></div>';
   h += card('מוצרים', L);
   const docs = (d.docs || []).map(x => documents[x.id] || x);
   if (docs.length) h += card('מסמכים', '<div class="tblw"><table class="tbl"><tbody>'+docs.map(x => '<tr><td>'+DOCK[x.kind]+(x.number ? ' '+esc(String(x.number)) : '')+(x.draft ? ' (טיוטה)' : '')+'</td><td class="psub">'+tsDate(x.created)+'</td><td class="n">'+money(x.total || 0)+'</td><td>'+(x.url ? '<a href="'+esc(x.url)+'" target="_blank" rel="noopener">PDF</a>' : '')+'</td></tr>').join('')+'</tbody></table></div>');
@@ -3668,6 +3692,7 @@ function renderDeal(pg, d){
   pg.querySelectorAll('[data-st]').forEach(b => b.addEventListener('click', async () => { if (b.dataset.st === d.stage) return; setStage(d, b.dataset.st); await putDeal(d); renderDeal(pg, d); }));
   pg.querySelectorAll('[data-rl]').forEach(b => b.addEventListener('click', async () => { d.lines.splice(+b.dataset.rl, 1); await putDeal(d); renderDeal(pg, d); }));
   $('#dlAddCat').addEventListener('click', () => { prTarget = d.id; setView('products'); });
+  bindSiteButtons(pg, () => $('#dlSiteQ').value);
   if ($('#dlBn')) $('#dlBn').addEventListener('change', async e => { const b = cat.sales.bundles[+e.target.value]; if (!b) return; const miss = await addBundleToDeal(b, d); renderDeal(pg, d); pgMsg('החבילה "' + esc(b.name) + '" נוספה' + (miss.length ? '. לא נמצאו במחירונים: ' + miss.map(esc).join(', ') : '.')); });
   $('#dlSaveBn').addEventListener('click', () => { if (!(d.lines || []).length){ pgMsg('אין שורות לשמור כחבילה.', true); return; } const b = saveDealAsBundle(d); pgMsg('נשמרה חבילה "' + esc(b.name) + '". אפשר לשנות לה שם בקטלוג המוצרים.'); });
   if ($('#dlStk')) $('#dlStk').addEventListener('click', () => printStickers(Object.values(assets).filter(a => a.dealId === d.id)));
@@ -4233,8 +4258,14 @@ async function makeDealProposal(d){
   pgMsg('ההצעה המעוצבת מוכנה. ההצעה הרשמית לחתימה ולתשלום יוצאת דרך סאמיט.');
 }
 
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !cloud || !['deals','products'].includes(viewMode)) return;
+  if (viewMode === 'products'){ await loadPriceLists(true); await loadPimages(true); renderProducts(); return; }
+  try { const r = await dealColRef().get(); const dx = {}; r.docs.forEach(q => { dx[q.id] = clone(q.data()); }); const before = JSON.stringify(deals[dealSel] || null); deals = dx;
+    if (!dealSel || JSON.stringify(deals[dealSel] || null) !== before){ await loadPimages(true); renderDeals(); } } catch(e) {}
+});
 /* ---------- navigation chrome & mobile tables ---------- */
-const APP_VERSION = '1.13.1';
+const APP_VERSION = '1.15.0';
 document.querySelectorAll('.appver').forEach(e => { e.textContent = APP_VERSION; });
 function labelTables(root){
   (root || document).querySelectorAll('table.tbl').forEach(tb => {

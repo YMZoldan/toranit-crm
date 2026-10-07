@@ -1,13 +1,46 @@
 {
   "manifest_version": 3,
   "name": "Toranit – מחירוני ספקים",
-  "version": "1.0.0",
-  "description": "כשמורידים מחירון מפורטל של ספק, התוסף שולח אותו אוטומטית ל-CRM של Toranit.",
-  "permissions": ["downloads", "storage", "notifications"],
-  "host_permissions": ["https://*.b-tech.co.il/*", "https://*.morlevi.co.il/*", "https://*.grandadvance.co.il/*", "https://crm.toranit.co.il/*"],
-  "optional_host_permissions": ["https://*/*"],
-  "background": { "service_worker": "background.js" },
+  "version": "1.2.0",
+  "description": "שולח מחירונים שמורידים מפורטלי הספקים ל-CRM של Toranit, ומוסיף כפתור \"הוסף ל-Toranit\" בדפי מוצר.",
+  "permissions": [
+    "downloads",
+    "storage",
+    "notifications",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.b-tech.co.il/*",
+    "https://*.morlevi.co.il/*",
+    "https://*.grandadvance.co.il/*",
+    "https://crm.toranit.co.il/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "options_page": "options.html",
-  "action": { "default_popup": "popup.html", "default_title": "Toranit – מחירוני ספקים" },
-  "icons": { "48": "icon48.png", "128": "icon128.png" }
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Toranit – מחירוני ספקים"
+  },
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.b-tech.co.il/*",
+        "https://*.morlevi.co.il/*",
+        "https://*.grandadvance.co.il/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }

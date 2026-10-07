@@ -309,6 +309,49 @@ async function extAuth(req, res, next) {
   } catch (e) { next(e); }
 }
 app.get('/api/ext/ping', extAuth, (req, res) => res.json({ ok: true, label: req.extKey.label }));
+/* the extension's "add to Toranit" button on supplier product pages */
+const WEB_COL = 'data/users/team/root/webitems', DEAL_COL = 'data/users/team/root/deals';
+app.get('/api/ext/deals', extAuth, async (req, res, next) => {
+  try {
+    const [d, c] = await Promise.all([pool.query('SELECT data FROM docs WHERE collection = $1', [DEAL_COL]), pool.query('SELECT data FROM docs WHERE collection = $1', [ROOT + '/customers'])]);
+    const names = {}; c.rows.forEach(r => { names[r.data.id] = r.data.name; });
+    res.json(d.rows.map(r => r.data).filter(x => ['draft', 'quote', 'approved'].includes(x.stage)).sort((a, b) => (b.updated || 0) - (a.updated || 0)).slice(0, 30)
+      .map(x => ({ id: x.id, number: x.number, title: x.title || '', customer: names[x.customerId] || '', lines: (x.lines || []).length })));
+  } catch (e) { next(e); }
+});
+app.post('/api/ext/product', extAuth, express.json({ limit: '64kb' }), async (req, res, next) => {
+  try {
+    const b = req.body || {};
+    const name = str(b.name, 200), supplier = str(b.supplier, 60), mpn = str(b.mpn, 60).replace(/\s+/g, ''), sku = str(b.sku, 60);
+    const price = Number(b.price); const qty = Math.max(1, Math.min(999, Math.round(+b.qty || 1)));
+    if (!name || !supplier) return bad(res, 'חסר שם מוצר או ספק');
+    if (!(price > 0) || price > 1e6) return bad(res, 'המחיר לא תקין');
+    const key = (mpn || sku || name).toUpperCase().replace(/\s+/g, '');
+    const id = sha256('web:' + supplier + ':' + key).slice(0, 24);
+    const old = (await pool.query('SELECT data FROM docs WHERE path = $1', [WEB_COL + '/' + id])).rows[0];
+    const item = Object.assign(old ? old.data : { id, created: Date.now() }, { s: sku || mpn, code: sku, mp: mpn, n: name, p: Math.round(price * 100) / 100, b: str(b.brand, 40), c: 'other', q: str(b.stock, 40), sup: supplier, url: str(b.url, 400), at: Date.now(),
+      d: Array.isArray(b.specs) ? b.specs.slice(0, 16).map(x => [str(x && x[0], 30), str(x && x[1], 160)]).filter(x => x[0] && x[1]) : [] });
+    await writeDoc(WEB_COL + '/' + id, item, null);
+    let image = null;
+    if (b.image && (/^https:\/\//i.test(String(b.image)) || (process.env.PLSOURCE_ALLOW_HTTP === 'true' && /^http:\/\//i.test(String(b.image))))) {
+      const has = (await pool.query("SELECT 1 FROM docs WHERE path = $1 AND data->>'status' = 'ok'", [PIMG_COL + '/' + pimgId(key)])).rows[0];
+      if (!has) { try { const blobId = await saveImageFrom(String(b.image), null); image = await putPimg(key, { status: 'ok', src: '/_blob/' + blobId, source: 'supplier' }, null); } catch (e) { image = { status: 'error', reason: e.message }; } }
+    }
+    let deal = null;
+    if (b.dealId) {
+      if (!/^[A-Za-z0-9_-]{4,40}$/.test(String(b.dealId))) return bad(res, 'bad deal');
+      const r = await pool.query('SELECT data FROM docs WHERE path = $1', [DEAL_COL + '/' + b.dealId]);
+      if (!r.rows[0]) return bad(res, 'ההזמנה לא נמצאה');
+      const d = r.rows[0].data; d.lines = d.lines || [];
+      const ex = d.lines.find(l => l.key === key && l.sup === supplier);
+      if (ex) ex.qty = (+ex.qty || 0) + qty;
+      else d.lines.push({ id: 'ln' + crypto.randomBytes(5).toString('hex'), key, name, sku: sku || mpn, mp: mpn, sup: supplier, cat: null, cost: item.p, price: null, qty, warr: null, fromWeb: true });
+      d.updated = Date.now(); await writeDoc(DEAL_COL + '/' + d.id, d, null);
+      deal = { id: d.id, number: d.number };
+    }
+    res.json({ ok: true, added: !old, key, image: image && image.status, deal });
+  } catch (e) { next(e); }
+});
 const INBOX_EXT = /\.(xlsx|xlsm|xlsb|xls|ods|csv|tsv|pdf|docx|txt)$/i;
 app.post('/api/inbox', extAuth, express.raw({ type: () => true, limit: '40mb' }), async (req, res, next) => {
   try {
