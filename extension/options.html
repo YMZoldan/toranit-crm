@@ -1,0 +1,21 @@
+<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8"><title>Toranit – הגדרות תוסף המחירונים</title>
+<style>
+body{font:15px system-ui,Segoe UI,Arial;background:#f3f3f6;color:#272336;margin:0;padding:24px}
+.box{max-width:640px;margin:auto;background:#fff;border:1px solid #dddbe3;border-radius:12px;padding:20px 22px}
+h1{font-size:19px;margin:0 0 4px}p{color:#6b6878;margin:4px 0 14px;line-height:1.5}
+label{display:block;margin:12px 0 4px;font-weight:600}input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:9px;border:1px solid #dddbe3;border-radius:8px;font:inherit}
+table{width:100%;border-collapse:collapse;margin-top:6px}td{padding:4px}td input{width:100%;box-sizing:border-box;padding:7px;border:1px solid #dddbe3;border-radius:6px;font:inherit}
+button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid #dddbe3;background:#fff;cursor:pointer}button.p{background:#d2452e;color:#fff;border-color:#d2452e}
+.row{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;align-items:center}#msg{margin-top:12px;font-weight:600}.ok{color:#067647}.bad{color:#b42318}
+</style></head><body><div class="box">
+<h1>תוסף מחירוני ספקים</h1>
+<p>כשמורידים מחירון מאחד הספקים שבטבלה, התוסף שולח אותו אוטומטית לתיבת המחירונים ב-CRM. ה-CRM קולט אותו עם ההגדרות של אותו ספק.</p>
+<label for="crm">כתובת ה-CRM</label><input type="text" id="crm" dir="ltr">
+<label for="key">מפתח תוסף (מה-CRM: מחירון והגדרות ← תוסף כרום)</label><input type="password" id="key" dir="ltr" placeholder="tk_...">
+<label><input type="checkbox" id="enabled"> שליחה אוטומטית פעילה</label>
+<label>ספקים</label>
+<table id="sup"><thead><tr><td><b>דומיין האתר</b></td><td><b>שם הספק ב-CRM</b></td><td></td></tr></thead><tbody></tbody></table>
+<div class="row"><button id="add">הוסף ספק</button></div>
+<div class="row"><button class="p" id="save">שמור</button><button id="test">בדוק חיבור ל-CRM</button></div>
+<div id="msg"></div></div>
+<script src="common.js"></script><script src="options.js"></script></body></html>

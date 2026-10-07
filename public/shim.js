@@ -155,9 +155,16 @@
     saveCustomer: c => api('POST', '/api/sumit/customer', { customer: c }),
     createDocument: d => api('POST', '/api/sumit/document', d),
     sync: days => api('POST', '/api/sumit/sync', { days }),
+    syncCustomers: folder => api('POST', '/api/sumit/synccustomers', { folder: folder || null }),
+    syncCustStatus: () => api('GET', '/api/sumit/synccuststatus'),
     syncStatus: () => api('GET', '/api/sumit/syncstatus')
   };
-  const caps = { db, user, assets, downloads, sumit };
+  const inbox = {
+    keys: { list: () => api('GET', '/api/extkeys'), create: label => api('POST', '/api/extkeys', { label }), revoke: id => api('DELETE', '/api/extkeys/' + encodeURIComponent(id)) },
+    blob: async blobId => { const r = await fetch('/_blob/' + encodeURIComponent(blobId), { credentials: 'same-origin' }); if (!r.ok) throw new Error('הקובץ לא נמצא בשרת'); return r.blob(); }
+  };
+  const caps = { db, user, assets, downloads, sumit, inbox };
+  window.__fetchProduct = url => api('POST', '/api/fetchproduct', { url });
   window.claude = Object.freeze({
     use: async name => {
       if (!(name in caps)) return null;

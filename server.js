@@ -277,6 +277,93 @@ app.get('/_blob/:id', auth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/* ---------- price-list inbox (Chrome extension uploads files with an extension key) ---------- */
+const EXT_COL = 'data/users/team/extkeys';
+const sha256 = s => crypto.createHash('sha256').update(String(s)).digest('hex');
+app.get('/api/extkeys', auth, async (req, res, next) => {
+  try { const r = await pool.query('SELECT data FROM docs WHERE collection = $1', [EXT_COL]); res.json(r.rows.map(x => ({ id: x.data.id, label: x.data.label, created: x.data.created, lastUsed: x.data.lastUsed || null }))); } catch (e) { next(e); }
+});
+app.post('/api/extkeys', auth, csrf, express.json({ limit: '4kb' }), async (req, res, next) => {
+  try {
+    const id = crypto.randomBytes(8).toString('hex'), key = 'tk_' + crypto.randomBytes(24).toString('hex');
+    const data = { id, hash: sha256(key), label: str(req.body && req.body.label, 60) || 'תוסף כרום', created: Date.now(), by: req.user.id };
+    await pool.query(`INSERT INTO docs (path, collection, data, updated_at, updated_by) VALUES ($1, $2, $3::jsonb, now(), $4)`, [EXT_COL + '/' + id, EXT_COL, JSON.stringify(data), req.user.id]);
+    res.json({ id, key, label: data.label });
+  } catch (e) { next(e); }
+});
+app.delete('/api/extkeys/:id', auth, csrf, async (req, res, next) => {
+  try { if (!/^[a-f0-9]{16}$/.test(req.params.id)) return bad(res, 'bad id'); await pool.query('DELETE FROM docs WHERE path = $1', [EXT_COL + '/' + req.params.id]); res.json({ ok: true }); } catch (e) { next(e); }
+});
+const extHits = new Map();
+async function extAuth(req, res, next) {
+  const m = /^Bearer\s+(tk_[a-f0-9]{48})$/.exec(String(req.get('Authorization') || ''));
+  const ip = req.ip || 'x', now = Date.now(), h = (extHits.get(ip) || []).filter(t => now - t < 60e3); h.push(now); extHits.set(ip, h);
+  if (h.length > 60) return res.status(429).json({ code: 'rate_limited', message: 'too many requests' });
+  if (!m) return res.status(401).json({ code: 'unauthenticated', message: 'מפתח תוסף חסר או שגוי' });
+  try {
+    const r = await pool.query("SELECT path, data FROM docs WHERE collection = $1 AND data->>'hash' = $2", [EXT_COL, sha256(m[1])]);
+    if (!r.rows[0]) return res.status(401).json({ code: 'unauthenticated', message: 'המפתח בוטל או לא קיים. צור מפתח חדש במסך מחירון.' });
+    const d = r.rows[0].data; d.lastUsed = Date.now();
+    await pool.query('UPDATE docs SET data = $2::jsonb WHERE path = $1', [r.rows[0].path, JSON.stringify(d)]);
+    req.extKey = d; next();
+  } catch (e) { next(e); }
+}
+app.get('/api/ext/ping', extAuth, (req, res) => res.json({ ok: true, label: req.extKey.label }));
+const INBOX_EXT = /\.(xlsx|xlsm|xlsb|xls|ods|csv|tsv|pdf|docx|txt)$/i;
+app.post('/api/inbox', extAuth, express.raw({ type: () => true, limit: '40mb' }), async (req, res, next) => {
+  try {
+    const dec = v => { try { return decodeURIComponent(String(v || '')); } catch (e) { return String(v || ''); } };
+    const fileName = dec(req.get('X-Filename')).replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').slice(0, 160), supplier = dec(req.get('X-Supplier')).slice(0, 60), sourceUrl = dec(req.get('X-Source-Url')).slice(0, 300);
+    if (!INBOX_EXT.test(fileName)) return bad(res, 'סוג קובץ לא נתמך: ' + fileName);
+    if (!Buffer.isBuffer(req.body) || req.body.length < 20) return bad(res, 'הקובץ ריק');
+    const head = req.body.slice(0, 200).toString('latin1').toLowerCase();
+    if (/<html|<!doctype/.test(head)) return bad(res, 'התקבל דף אינטרנט ולא קובץ. כנראה שהחיבור לפורטל של הספק פג. התחבר מחדש ונסה שוב.');
+    const blobId = crypto.randomBytes(16).toString('hex');
+    await fs.promises.writeFile(path.join(UPLOAD_DIR, blobId), req.body, { flag: 'wx' });
+    await pool.query('INSERT INTO uploads (id, mime, size, created_by) VALUES ($1, $2, $3, $4)', [blobId, 'application/octet-stream', req.body.length, null]);
+    const id = 'in' + crypto.randomBytes(6).toString('hex');
+    const data = { id, blobId, supplier, fileName, size: req.body.length, at: Date.now(), status: 'new', source: 'extension', sourceUrl, key: req.extKey.label };
+    await pool.query(`INSERT INTO docs (path, collection, data, updated_at) VALUES ($1, $2, $3::jsonb, now())`, ['data/users/team/root/plinbox/' + id, 'data/users/team/root/plinbox', JSON.stringify(data)]);
+    res.json({ ok: true, id });
+  } catch (e) { next(e); }
+});
+
+/* ---------- product page lookup (one page, on request, approved shops only) ---------- */
+const FETCH_HOSTS = ['gamers-outlet.net'].concat(String(process.env.FETCH_HOSTS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean));
+const htmlDecode = s => String(s || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&#(\d+);/g, (m, n) => String.fromCharCode(+n)).replace(/\s+/g, ' ').trim();
+function parseProductPage(html) {
+  let name = '', price = null, currency = '';
+  for (const m of html.matchAll(/<script[^>]+application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const walk = o => { if (!o || typeof o !== 'object') return; if (Array.isArray(o)) return o.forEach(walk);
+        if (/product/i.test(String(o['@type'] || ''))) { name = name || o.name || ''; const of = Array.isArray(o.offers) ? o.offers[0] : o.offers; if (of) { price = price ?? (of.price ?? of.lowPrice); currency = currency || of.priceCurrency || ''; } }
+        Object.values(o).forEach(walk); };
+      walk(JSON.parse(m[1]));
+    } catch (e) {}
+  }
+  const meta = p => { const r = new RegExp('<meta[^>]+(?:property|name|itemprop)=["\']' + p + '["\'][^>]*content=["\']([^"\']*)', 'i').exec(html) || new RegExp('<meta[^>]+content=["\']([^"\']*)["\'][^>]*(?:property|name|itemprop)=["\']' + p + '["\']', 'i').exec(html); return r ? htmlDecode(r[1]) : ''; };
+  name = name || meta('og:title') || htmlDecode((/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html) || [])[1]).replace(/<[^>]+>/g, '') || htmlDecode((/<title>([\s\S]*?)<\/title>/i.exec(html) || [])[1]);
+  if (price == null) { const v = meta('product:price:amount') || meta('price') || meta('og:price:amount'); if (v) price = v; currency = currency || meta('product:price:currency') || meta('priceCurrency') || meta('og:price:currency'); }
+  if (price == null) { const m = /itemprop=["']price["'][^>]*content=["']([\d.,]+)/i.exec(html); if (m) price = m[1]; }
+  if (price == null) { const m = /(€|\$|₪)\s*([\d]+(?:[.,]\d{1,2})?)/.exec(html.replace(/<[^>]+>/g, ' ')); if (m) { price = m[2]; currency = currency || { '€': 'EUR', '$': 'USD', '₪': 'ILS' }[m[1]]; } }
+  const num = price == null ? null : Number(String(price).replace(/,(\d{1,2})$/, '.$1').replace(/[^\d.]/g, ''));
+  return { name: String(name || '').slice(0, 200), price: Number.isFinite(num) ? num : null, currency: String(currency || '').toUpperCase().slice(0, 3) || (/€/.test(html) ? 'EUR' : '') };
+}
+app.post('/api/fetchproduct', auth, csrf, express.json({ limit: '4kb' }), async (req, res, next) => {
+  try {
+    let u; try { u = new URL(String(req.body && req.body.url || '')); } catch (e) { return bad(res, 'קישור לא תקין'); }
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    if (u.protocol !== 'https:' || !FETCH_HOSTS.some(h => host === h || host.endsWith('.' + h))) return bad(res, 'אפשר למשוך רק מאתרים מאושרים: ' + FETCH_HOSTS.join(', '));
+    const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 15000);
+    let r; try { r = await fetch(u.toString(), { signal: ctl.signal, redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0 (Toranit CRM product lookup)', 'Accept': 'text/html' } }); } finally { clearTimeout(t); }
+    if (!r.ok) return bad(res, 'האתר החזיר שגיאה ' + r.status);
+    const html = (await r.text()).slice(0, 3e6);
+    const p = parseProductPage(html);
+    if (!p.name) return bad(res, 'לא נמצא שם מוצר בעמוד');
+    res.json(Object.assign(p, { site: host, url: u.toString() }));
+  } catch (e) { if (e && e.name === 'AbortError') return bad(res, 'האתר לא ענה בזמן'); next(e); }
+});
+
 /* ---------- SUMIT (accounting) ---------- */
 const SUMIT_BASE = (process.env.SUMIT_API_URL || 'https://api.sumit.co.il').replace(/\/+$/, '');
 class SumitError extends Error { constructor(msg) { super(msg); this.sumit = true; } }
@@ -538,6 +625,97 @@ async function syncFromSumit(user, days) {
   }).finally(() => { syncRunning = null; });
   return syncRunning;
 }
+/* ---------- SUMIT customers (CRM folder) -> app customers ---------- */
+const SYNC_CUST_DOC = 'data/users/team/sumitsynccust';
+let custSyncRunning = null;
+const firstVal = v => {
+  if (v == null) return '';
+  if (Array.isArray(v)) { for (const x of v) { const y = firstVal(x); if (y !== '') return y; } return ''; }
+  if (typeof v === 'object') return firstVal(v.Name ?? v.Value ?? v.Title ?? v.Text ?? v.ID ?? Object.values(v)[0]);
+  return String(v).trim();
+};
+const PROP_MAP = [
+  ['name', /(^|_)(full)?name$|fullname|customername|^שם|title$/i],
+  ['companyNumber', /companynumber|company_number|idnumber|taxid|vatid|ח\.?פ|ע\.?מ|תעודת זהות|identifier$/i],
+  ['email', /e-?mail/i], ['phone', /phone|mobile|טלפון|נייד/i], ['city', /city|עיר|ישוב/i],
+  ['address', /address|street|כתובת|רחוב/i], ['zip', /zip|postal|מיקוד/i], ['contact', /contact|איש קשר/i]];
+function mapCustomerProps(props) {
+  const out = {}; const keys = Object.keys(props || {});
+  for (const [field, re] of PROP_MAP) {
+    const k = keys.find(k => re.test(k) && !(field === 'name' && /(contact|city|folder|user|owner|file|status)/i.test(k)) && !(field === 'address' && /mail/i.test(k)) && !(field === 'phone' && /fax/i.test(k)));
+    if (k) { const v = firstVal(props[k]); if (v) out[field] = v.slice(0, 200); }
+  }
+  return out;
+}
+const digits = s => String(s || '').replace(/\D/g, '');
+async function syncCustomersFromSumit(user, folderHint) {
+  if (custSyncRunning) return custSyncRunning;
+  custSyncRunning = (async () => {
+    const started = Date.now();
+    const fl = await sumitCall('/crm/schema/listfolders/', { NameFilter: null }, user, 'cust folders');
+    const folders = (fl.Folders || []).map(f => ({ id: f.ID, name: String(f.Name || '') }));
+    const hint = String(folderHint || '').trim();
+    const folder = (hint && folders.find(f => String(f.id) === hint || f.name === hint))
+      || folders.find(f => /^לקוחות$/.test(f.name.trim())) || folders.find(f => /^customers?$/i.test(f.name.trim()))
+      || folders.find(f => /לקוח|customer|client/i.test(f.name));
+    if (!folder) throw new SumitError('לא נמצאה תיקיית לקוחות בסאמיט. התיקיות שנמצאו: ' + (folders.map(f => f.name).join(', ') || 'אין'));
+    const fetchAll = async folderParam => {
+      const ents = [];
+      for (let page = 0, start = 0, more = true; more && page < 300; page++) {
+        const d = await sumitCall('/crm/data/listentities/', { Folder: folderParam, IncludeInheritedFolders: false, Filters: [], Order: null, Paging: { StartIndex: start, PageSize: 100 }, LoadProperties: true }, user, 'cust list ' + start);
+        const got = d.Entities || []; got.forEach(x => ents.push(x)); start += got.length; more = !!d.HasNextPage && got.length > 0;
+      }
+      return ents;
+    };
+    let ents;
+    try { ents = await fetchAll(String(folder.id)); } catch (e) { ents = await fetchAll(folder.name); }
+    const customers = await readCollection(ROOT + '/customers');
+    const idx = { sumit: {}, cn: {}, email: {}, phone: {}, name: {} };
+    const index = c => {
+      if (c.sumitId != null && c.sumitId !== '') idx.sumit[String(c.sumitId)] = c;
+      if (digits(c.companyNumber).length >= 5) idx.cn[digits(c.companyNumber)] = c;
+      if (c.email) idx.email[String(c.email).toLowerCase().trim()] = c;
+      if (digits(c.phone).length >= 9) idx.phone[digits(c.phone).slice(-9)] = c;
+      const n = normName(c.name); if (n) idx.name[n] = c;
+    };
+    Object.values(customers).forEach(index);
+    const stats = { found: ents.length, newCustomers: 0, updated: 0, linked: 0, unchanged: 0, folder: folder.name, sampleKeys: [] };
+    if (ents[0]) stats.sampleKeys = Object.keys(ents[0].Properties || {}).slice(0, 40);
+    let mappedNames = 0;
+    for (const en of ents) {
+      const m = mapCustomerProps(en.Properties);
+      if (m.name) mappedNames++;
+      const sid = en.ID != null ? String(en.ID) : '';
+      let c = (sid && idx.sumit[sid]) || (digits(m.companyNumber).length >= 5 && idx.cn[digits(m.companyNumber)]) || (m.email && idx.email[m.email.toLowerCase()]) || (digits(m.phone).length >= 9 && idx.phone[digits(m.phone).slice(-9)]) || (m.name && idx.name[normName(m.name)]) || null;
+      if (c && c.sumitId != null && c.sumitId !== '' && sid && String(c.sumitId) !== sid) c = null;
+      if (!c) {
+        if (!m.name) continue;
+        c = { id: 'c' + crypto.randomBytes(6).toString('hex'), name: m.name, companyNumber: m.companyNumber || '', contact: m.contact || '', phone: m.phone || '', email: m.email || '', city: m.city || '', address: m.address || '', zip: m.zip || '', notes: '', sumitId: en.ID, source: 'sumit', created: Date.now(), updated: Date.now() };
+        await writeDoc(ROOT + '/customers/' + c.id, c, user && user.id); index(c); stats.newCustomers++; continue;
+      }
+      const before = JSON.stringify(c);
+      const wasLinked = c.sumitId != null && c.sumitId !== '';
+      if (!wasLinked && sid) c.sumitId = en.ID;
+      for (const f of ['name', 'companyNumber', 'phone', 'email', 'city', 'address', 'zip', 'contact']) if (m[f] && m[f] !== c[f]) c[f] = m[f];
+      if (JSON.stringify(c) !== before) { c.updated = Date.now(); await writeDoc(ROOT + '/customers/' + c.id, c, user && user.id); index(c); if (!wasLinked) stats.linked++; else stats.updated++; }
+      else stats.unchanged++;
+    }
+    stats.mappedNames = mappedNames;
+    const result = { at: Date.now(), ms: Date.now() - started, ok: true, stats, folders };
+    await writeDoc(SYNC_CUST_DOC, result, user && user.id);
+    return result;
+  })().catch(async e => {
+    try { await writeDoc(SYNC_CUST_DOC, { at: Date.now(), ok: false, error: (e && e.message) || 'sync failed' }, user && user.id); } catch (_) {}
+    throw e;
+  }).finally(() => { custSyncRunning = null; });
+  return custSyncRunning;
+}
+app.post('/api/sumit/synccustomers', auth, csrf, express.json({ limit: '10kb' }), async (req, res, next) => {
+  try { res.json(await syncCustomersFromSumit(req.user, req.body && req.body.folder)); } catch (e) { next(e); }
+});
+app.get('/api/sumit/synccuststatus', auth, async (req, res, next) => {
+  try { const r = await pool.query('SELECT data FROM docs WHERE path = $1', [SYNC_CUST_DOC]); res.json(r.rows[0] ? r.rows[0].data : null); } catch (e) { next(e); }
+});
 app.post('/api/sumit/sync', auth, csrf, express.json({ limit: '10kb' }), async (req, res, next) => {
   try { const days = numIn(req.body && req.body.days, 7, 3650) || 365; res.json(await syncFromSumit(req.user, days)); } catch (e) { next(e); }
 });
@@ -614,7 +792,7 @@ async function main() {
     console.log('no users yet: run  docker compose exec app node server.js adduser <email> <password>');
   }
   const server = app.listen(PORT, () => console.log('listening on', PORT));
-  const autoSync = async () => { try { if (await getSumitCreds()) { const r = await syncFromSumit(null, 120); console.log('sumit sync:', JSON.stringify(r.stats)); } } catch (e) { console.log('sumit sync failed:', e.message); } };
+  const autoSync = async () => { try { if (await getSumitCreds()) { try { const c = await syncCustomersFromSumit(null); console.log('sumit customers sync:', JSON.stringify(Object.assign({}, c.stats, { sampleKeys: undefined }))); } catch (e) { console.log('sumit customers sync failed:', e.message); } const r = await syncFromSumit(null, 120); console.log('sumit sync:', JSON.stringify(r.stats)); } } catch (e) { console.log('sumit sync failed:', e.message); } };
   if (process.env.SUMIT_AUTO_SYNC !== 'false') { setTimeout(autoSync, 90e3).unref(); setInterval(autoSync, 60 * 60e3).unref(); }
   const stop = () => { server.close(() => pool.end().then(() => process.exit(0))); setTimeout(() => process.exit(0), 5000).unref(); };
   process.on('SIGTERM', stop); process.on('SIGINT', stop);
