@@ -81,7 +81,7 @@
         let r;
         try { r = await fetch('/api/me', { credentials: 'same-origin' }); }
         catch (e) { await showOffline(); continue; }
-        if (r.ok) return r.json();
+        if (r.ok) { const me = await r.json(); window.__me = me; return me; }
         if (r.status === 401) { try { await showLogin(); } catch (e) { loginP = null; await showOffline(); } continue; }
         await showOffline();
       }
@@ -168,6 +168,16 @@
   const caps = { db, user, assets, downloads, sumit, inbox };
   window.__fetchProduct = url => api('POST', '/api/fetchproduct', { url });
   window.__productImage = req => api('POST', '/api/productimage', req);
+  window.__users = {
+    list: () => api('GET', '/api/users'), create: u => api('POST', '/api/users', u), update: (id, u) => api('PUT', '/api/users/' + encodeURIComponent(id), u),
+    changeMyPassword: (current, password) => api('POST', '/api/me/password', { current, password })
+  };
+  window.__fin = {
+    mailStatus: () => api('GET', '/api/mail/status'), mailSave: m => api('PUT', '/api/mail/settings', m), mailTest: () => api('POST', '/api/mail/test'),
+    mailSend: m => api('POST', '/api/mail/send', m), mailPoll: () => api('POST', '/api/mail/poll'),
+    aiStatus: () => api('GET', '/api/ai/status'), aiSave: a => api('PUT', '/api/ai/settings', a), aiReceipt: blobId => api('POST', '/api/ai/receipt', { blobId }),
+    upload: async file => api('POST', '/api/expupload', await file.arrayBuffer(), 'application/octet-stream')
+  };
   window.claude = Object.freeze({
     use: async name => {
       if (!(name in caps)) return null;

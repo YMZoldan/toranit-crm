@@ -2,9 +2,9 @@
 
 ## הדרך המהירה: שרת חדש (Kamatera או כל שרת Ubuntu)
 ```bash
-scp cameras-v1.15.0.zip root@SERVER-IP:/root/   # מהמחשב, ב-PowerShell
+scp cameras-v1.17.0.zip root@SERVER-IP:/root/   # מהמחשב, ב-PowerShell
 ssh root@SERVER-IP                             # התחברות לשרת
-apt-get install -y unzip && unzip -o cameras-v1.15.0.zip && bash cameras/install.sh
+apt-get install -y unzip && unzip -o cameras-v1.17.0.zip && bash cameras/install.sh
 ```
 הסקריפט שואל דומיין, אימייל וסיסמה, ומתקין: עדכונים, חומת אש, fail2ban, Docker,
 Traefik עם תעודת HTTPS, את האפליקציה, וגיבוי לילי. מריצים אותו שוב לעדכון גרסה.
@@ -69,6 +69,14 @@ docker compose logs -f app      # צריך להופיע: listening on 3000
 - **כל עדכון:** במחשב `publish-update.ps1 cameras-vX.Y.Z.zip`, ובשרת `cameras-update`.
 - **חזרה לגרסה קודמת:** `cameras-update v1.4.0`.
 - **בדיקת הגרסה המותקנת:** `cat /opt/cameras/VERSION`, או בתחתית סרגל הצד באפליקציה.
+
+## משתמשים והרשאות
+הגדרות ← "משתמשים והרשאות". משתמשים קיימים מהגרסאות הקודמות הם "מנהל מערכת".
+חייב להישאר לפחות מנהל מערכת פעיל אחד. משתמש מושבת מנותק מיד.
+
+## מייל וקבלות
+במחירון ← "מייל וזיהוי קבלות": משתמש, סיסמה, שרת SMTP (בדרך כלל 465) ושרת IMAP (בדרך כלל 993) מספק האחסון.
+מומלץ לפתוח תיבה ייעודית לקבלות (למשל expenses@) ולהעביר אליה קבלות מהמייל או לשתף אליה מוואטסאפ.
 
 ## חיבור לסאמיט (לקוחות, הצעות מחיר, דרישות תשלום וקבלות)
 1. בסאמיט: הגדרות ← חיבור מערכות / מפתחות API. העתק את **מספר החברה** ואת **מפתח ה־API**.

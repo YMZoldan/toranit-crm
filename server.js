@@ -37,6 +37,10 @@ async function migrate() {
       name TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS perms JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMPTZ;
     CREATE TABLE IF NOT EXISTS docs (
       path TEXT PRIMARY KEY,
       collection TEXT NOT NULL,
@@ -123,12 +127,12 @@ app.use((req, res, next) => {
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   res.setHeader('Content-Security-Policy', [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net",
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
     "img-src 'self' data: blob:",
     "connect-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://fonts.googleapis.com https://fonts.gstatic.com",
-    "worker-src 'self'",
+    "worker-src 'self' blob: https://cdn.jsdelivr.net https://cdnjs.cloudflare.com",
     "manifest-src 'self'",
     "frame-ancestors 'self'",
     "base-uri 'self'",
@@ -142,14 +146,59 @@ app.get('/healthz', async (req, res) => {
   catch (e) { res.status(503).json({ ok: false }); }
 });
 
+/* roles and permissions: 0 = none, 1 = view, 2 = edit */
+const MODULES = { dashboard: 'דשבורד', customers: 'לקוחות', service: 'קריאות שירות', billing: 'גבייה ומסמכים', sales: 'מכירות מחשוב', finance: 'כספים (הוצאות, בנק, דוח)', projects: 'פרויקטים ומצלמות', pricelist: 'מחירון', settings: 'הגדרות', users: 'משתמשים והרשאות' };
+const ROLES = {
+  admin:      { label: 'מנהל מערכת', perms: { dashboard: 2, customers: 2, service: 2, billing: 2, sales: 2, finance: 2, projects: 2, pricelist: 2, settings: 2, users: 2 } },
+  manager:    { label: 'מנהל', perms: { dashboard: 2, customers: 2, service: 2, billing: 2, sales: 2, finance: 2, projects: 2, pricelist: 2, settings: 2, users: 0 } },
+  office:     { label: 'מנהל משרד', perms: { dashboard: 1, customers: 2, service: 2, billing: 2, sales: 2, finance: 1, projects: 1, pricelist: 1, settings: 0, users: 0 } },
+  accountant: { label: 'הנהלת חשבונות', perms: { dashboard: 1, customers: 1, service: 0, billing: 2, sales: 1, finance: 2, projects: 0, pricelist: 1, settings: 0, users: 0 } },
+  sales:      { label: 'מכירות', perms: { dashboard: 1, customers: 2, service: 1, billing: 1, sales: 2, finance: 0, projects: 2, pricelist: 1, settings: 0, users: 0 } },
+  technician: { label: 'טכנאי', perms: { dashboard: 1, customers: 1, service: 2, billing: 0, sales: 1, finance: 0, projects: 2, pricelist: 1, settings: 0, users: 0 } },
+  custom:     { label: 'מותאם אישית', perms: {} }
+};
+function effPerms(u) {
+  const base = (ROLES[u.role] || ROLES.admin).perms, out = {};
+  Object.keys(MODULES).forEach(k => { const v = u.role === 'custom' ? +((u.perms || {})[k] || 0) : +(base[k] || 0); out[k] = Math.max(0, Math.min(2, v)); });
+  out.dashboard = Math.max(1, out.dashboard);
+  return out;
+}
+const can = (req, mod, lvl) => !!(req.user && req.user.perm && (req.user.perm[mod] || 0) >= lvl);
+const needAny = (mods, lvl) => (req, res, next) => mods.some(m => can(req, m, lvl)) ? next() : res.status(403).json({ code: 'permission_denied', message: 'אין לך הרשאה לפעולה הזו.' });
+/* which module owns a stored path (data/users/team/...) */
+function pathModule(p) {
+  const m = /^data\/users\/[^/]+\/(?:root\/)?([^/]+)/.exec(String(p || '')); const c = m ? m[1] : '';
+  if (/^(documents|maillog)$/.test(c)) return 'billing';
+  if (/^(expenses|banktx|expinbox)$/.test(c)) return 'finance';
+  if (/^(deals|assets|licenses|pimages|webitems)$/.test(c)) return 'sales';
+  if (/^(customers)$/.test(c)) return 'customers';
+  if (/^(tickets)$/.test(c)) return 'service';
+  if (/^(projects|summaries)$/.test(c)) return 'projects';
+  if (/^(pricelists|plitems|plinbox)$/.test(c)) return 'pricelist';
+  if (/^(catalog)$/.test(c)) return 'catalog';
+  if (/^(extkeys|plsources|sumitcustcfg)$/.test(c)) return 'settings';
+  return 'shared';
+}
+const READ_OPEN = { customers: 1, service: 1, projects: 1, pricelist: 1, catalog: 1, shared: 1 };
+function docAccess(req, p, write) {
+  const mod = pathModule(p);
+  if (mod === 'catalog') return write ? (can(req, 'pricelist', 2) || can(req, 'settings', 2) || can(req, 'billing', 2) || can(req, 'projects', 2)) : true;
+  if (mod === 'shared') return write ? Object.keys(MODULES).some(k => k !== 'users' && k !== 'dashboard' && can(req, k, 2)) : true;
+  if (write) return can(req, mod, 2) || (mod === 'customers' && ['billing', 'service', 'sales', 'projects'].some(k => can(req, k, 2))) || (mod === 'billing' && ['service', 'sales', 'projects'].some(k => can(req, k, 2)));
+  return READ_OPEN[mod] ? true : can(req, mod, 1);
+}
+const denied = res => res.status(403).json({ code: 'permission_denied', message: 'אין לך הרשאה לפעולה הזו.' });
+
 /* auth helpers */
 async function auth(req, res, next) {
   const s = verify(readCookies(req)[COOKIE]);
   if (!s) return res.status(401).json({ code: 'unauthenticated', message: 'login required' });
   try {
-    const r = await pool.query('SELECT id, email, name FROM users WHERE id = $1', [s.uid]);
-    if (!r.rows[0]) return res.status(401).json({ code: 'unauthenticated', message: 'login required' });
-    req.user = r.rows[0];
+    const r = await pool.query('SELECT id, email, name, role, perms, disabled FROM users WHERE id = $1', [s.uid]);
+    if (!r.rows[0] || r.rows[0].disabled) return res.status(401).json({ code: 'unauthenticated', message: 'login required' });
+    req.user = r.rows[0]; req.user.perm = effPerms(req.user);
+    const rule = ROUTE_RULES.find(x => (x[0] === '*' || x[0] === req.method) && x[1].test(req.path));
+    if (rule && !rule[2].some(m => can(req, m, rule[3]))) return denied(res);
     next();
   } catch (e) { next(e); }
 }
@@ -178,9 +227,11 @@ app.post('/api/login', express.json({ limit: '10kb' }), csrf, async (req, res, n
     if (limited(ip)) return res.status(429).json({ code: 'rate_limited', message: 'יותר מדי ניסיונות. נסה שוב בעוד רבע שעה.' });
     const email = String((req.body && req.body.email) || '').trim().toLowerCase();
     const password = String((req.body && req.body.password) || '');
-    const r = await pool.query('SELECT id, pass_hash FROM users WHERE email = $1', [email]);
+    const r = await pool.query('SELECT id, pass_hash, disabled FROM users WHERE email = $1', [email]);
     const u = r.rows[0];
     if (!u || !checkPw(password, u.pass_hash)) { failed(ip); return res.status(401).json({ code: 'bad_login', message: 'אימייל או סיסמה שגויים.' }); }
+    if (u.disabled) return res.status(403).json({ code: 'disabled', message: 'המשתמש הזה הושבת. פנה למנהל המערכת.' });
+    pool.query('UPDATE users SET last_login = now() WHERE id = $1', [u.id]).catch(() => {});
     attempts.delete(ip);
     const exp = Date.now() + SESSION_DAYS * 864e5;
     res.setHeader('Set-Cookie', `${COOKIE}=${sign({ uid: u.id, exp })}; ${cookieAttrs(SESSION_DAYS * 86400)}`);
@@ -191,7 +242,64 @@ app.post('/api/logout', csrf, (req, res) => {
   res.setHeader('Set-Cookie', `${COOKIE}=; ${cookieAttrs(0)}`);
   res.json({ ok: true });
 });
-app.get('/api/me', auth, (req, res) => res.json({ id: req.user.id, email: req.user.email, name: req.user.name }));
+app.get('/api/me', auth, (req, res) => res.json({ id: req.user.id, email: req.user.email, name: req.user.name, role: req.user.role, roleLabel: (ROLES[req.user.role] || {}).label || '', perms: req.user.perm }));
+/* per-route permissions (checked inside auth, before any body is read) */
+const ROUTE_RULES = [
+  ['*', /^\/api\/users/, ['users'], 1],
+  ['PUT', /^\/api\/sumit\/credentials/, ['settings'], 2], ['POST', /^\/api\/sumit\/test/, ['settings'], 2],
+  ['POST', /^\/api\/sumit\/customer/, ['customers', 'billing', 'sales', 'service', 'projects'], 2],
+  ['POST', /^\/api\/sumit\/document/, ['billing', 'sales', 'service', 'projects'], 2],
+  ['POST', /^\/api\/sumit\/sync$/, ['billing'], 2], ['POST', /^\/api\/sumit\/synccustomers/, ['customers'], 2], ['GET', /^\/api\/sumit\/custfolders/, ['customers'], 2],
+  ['*', /^\/api\/extkeys/, ['settings'], 2], ['*', /^\/api\/plsources/, ['pricelist', 'settings'], 2],
+  ['PUT', /^\/api\/mail\/settings/, ['settings'], 2], ['POST', /^\/api\/mail\/test/, ['settings'], 2], ['PUT', /^\/api\/ai\/settings/, ['settings'], 2],
+  ['POST', /^\/api\/mail\/send/, ['billing'], 2], ['POST', /^\/api\/mail\/poll/, ['finance'], 2],
+  ['POST', /^\/api\/expupload/, ['finance'], 2], ['POST', /^\/api\/ai\/receipt/, ['finance'], 2],
+  ['POST', /^\/api\/productimage/, ['sales', 'pricelist'], 2], ['POST', /^\/api\/fetchproduct/, ['sales', 'pricelist'], 2],
+  ['POST', /^\/api\/uploads/, ['projects', 'service', 'sales', 'pricelist', 'finance'], 2]
+];
+/* user management (admin) */
+const pubUser = u => ({ id: u.id, email: u.email, name: u.name, role: u.role, roleLabel: (ROLES[u.role] || {}).label || u.role, perms: u.role === 'custom' ? u.perms : (ROLES[u.role] || ROLES.admin).perms, disabled: u.disabled, lastLogin: u.last_login, created: u.created_at });
+async function adminsLeft(exceptId) { const r = await pool.query("SELECT count(*)::int AS n FROM users WHERE role = 'admin' AND NOT disabled AND id <> $1", [exceptId || 0]); return r.rows[0].n; }
+app.get('/api/users', auth, async (req, res, next) => {
+  try { const r = await pool.query('SELECT id, email, name, role, perms, disabled, last_login, created_at FROM users ORDER BY id');
+    res.json({ users: r.rows.map(pubUser), roles: Object.fromEntries(Object.entries(ROLES).map(([k, v]) => [k, { label: v.label, perms: v.perms }])), modules: MODULES, me: req.user.id });
+  } catch (e) { next(e); }
+});
+const cleanPerms = p => { const o = {}; Object.keys(MODULES).forEach(k => { o[k] = Math.max(0, Math.min(2, Math.round(+((p || {})[k] || 0)))); }); return o; };
+app.post('/api/users', auth, csrf, express.json({ limit: '8kb' }), async (req, res, next) => {
+  try {
+    if (!can(req, 'users', 2)) return denied(res);
+    const b = req.body || {}, email = str(b.email, 120).toLowerCase(), pw = String(b.password || ''), role = ROLES[b.role] ? b.role : 'technician';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return bad(res, 'כתובת מייל לא תקינה');
+    if (pw.length < 8) return bad(res, 'סיסמה של 8 תווים לפחות');
+    const ex = await pool.query('SELECT 1 FROM users WHERE email = $1', [email]); if (ex.rows[0]) return bad(res, 'כבר קיים משתמש עם המייל הזה');
+    const r = await pool.query('INSERT INTO users (email, pass_hash, name, role, perms) VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING id, email, name, role, perms, disabled, last_login, created_at', [email, hashPw(pw), str(b.name, 80), role, JSON.stringify(cleanPerms(b.perms))]);
+    res.json(pubUser(r.rows[0]));
+  } catch (e) { next(e); }
+});
+app.put('/api/users/:id', auth, csrf, express.json({ limit: '8kb' }), async (req, res, next) => {
+  try {
+    if (!can(req, 'users', 2)) return denied(res);
+    const id = +req.params.id, b = req.body || {}, cur = (await pool.query('SELECT * FROM users WHERE id = $1', [id])).rows[0];
+    if (!cur) return res.status(404).json({ code: 'not_found', message: 'המשתמש לא נמצא' });
+    const role = b.role && ROLES[b.role] ? b.role : cur.role, disabled = b.disabled == null ? cur.disabled : !!b.disabled;
+    if (cur.role === 'admin' && !cur.disabled && (role !== 'admin' || disabled) && await adminsLeft(id) === 0) return bad(res, 'חייב להישאר לפחות מנהל מערכת פעיל אחד');
+    if (id === req.user.id && disabled) return bad(res, 'אי אפשר להשבית את המשתמש שלך');
+    const email = b.email ? str(b.email, 120).toLowerCase() : cur.email;
+    if (email !== cur.email) { if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return bad(res, 'כתובת מייל לא תקינה'); const ex = await pool.query('SELECT 1 FROM users WHERE email = $1 AND id <> $2', [email, id]); if (ex.rows[0]) return bad(res, 'כבר קיים משתמש עם המייל הזה'); }
+    let hash = cur.pass_hash; if (b.password) { if (String(b.password).length < 8) return bad(res, 'סיסמה של 8 תווים לפחות'); hash = hashPw(String(b.password)); }
+    const r = await pool.query('UPDATE users SET email = $2, name = $3, role = $4, perms = $5::jsonb, disabled = $6, pass_hash = $7 WHERE id = $1 RETURNING id, email, name, role, perms, disabled, last_login, created_at',
+      [id, email, b.name != null ? str(b.name, 80) : cur.name, role, JSON.stringify(b.perms ? cleanPerms(b.perms) : cur.perms), disabled, hash]);
+    res.json(pubUser(r.rows[0]));
+  } catch (e) { next(e); }
+});
+app.post('/api/me/password', auth, csrf, express.json({ limit: '4kb' }), async (req, res, next) => {
+  try { const b = req.body || {}, cur = (await pool.query('SELECT pass_hash FROM users WHERE id = $1', [req.user.id])).rows[0];
+    if (!checkPw(String(b.current || ''), cur.pass_hash)) return bad(res, 'הסיסמה הנוכחית שגויה');
+    if (String(b.password || '').length < 8) return bad(res, 'סיסמה של 8 תווים לפחות');
+    await pool.query('UPDATE users SET pass_hash = $2 WHERE id = $1', [req.user.id, hashPw(String(b.password))]); res.json({ ok: true });
+  } catch (e) { next(e); }
+});
 
 /* ---------- document store (mirrors the app's db API) ---------- */
 const SEG = /^[A-Za-z0-9_\-.~:@+]{1,200}$/;
@@ -208,6 +316,7 @@ const jsonBody = express.json({ limit: '600kb' });
 app.get('/api/doc', auth, async (req, res, next) => {
   try {
     const p = parsePath(req.query.path, true); if (!p) return bad(res, 'bad path');
+    if (!docAccess(req, p.path, false)) return denied(res);
     const r = await pool.query('SELECT data FROM docs WHERE path = $1', [p.path]);
     res.json({ exists: !!r.rows[0], data: r.rows[0] ? r.rows[0].data : null });
   } catch (e) { next(e); }
@@ -215,6 +324,8 @@ app.get('/api/doc', auth, async (req, res, next) => {
 app.put('/api/doc', auth, csrf, jsonBody, async (req, res, next) => {
   try {
     const p = parsePath(req.body && req.body.path, true); if (!p) return bad(res, 'bad path');
+    if (!docAccess(req, p.path, true)) return denied(res);
+    if (pathModule(p.path) === 'billing' && !can(req, 'billing', 2) && (await pool.query('SELECT 1 FROM docs WHERE path = $1', [p.path])).rows[0]) return denied(res);
     const data = req.body.data;
     if (!data || typeof data !== 'object' || Array.isArray(data)) return bad(res, 'body must be an object');
     const txt = JSON.stringify(data);
@@ -229,6 +340,7 @@ app.put('/api/doc', auth, csrf, jsonBody, async (req, res, next) => {
 app.patch('/api/doc', auth, csrf, jsonBody, async (req, res, next) => {
   try {
     const p = parsePath(req.body && req.body.path, true); if (!p) return bad(res, 'bad path');
+    if (!docAccess(req, p.path, true) || (pathModule(p.path) === 'billing' && !can(req, 'billing', 2))) return denied(res);
     const data = req.body.data;
     if (!data || typeof data !== 'object' || Array.isArray(data)) return bad(res, 'body must be an object');
     const r = await pool.query(
@@ -241,6 +353,7 @@ app.patch('/api/doc', auth, csrf, jsonBody, async (req, res, next) => {
 app.delete('/api/doc', auth, csrf, async (req, res, next) => {
   try {
     const p = parsePath(req.query.path, true); if (!p) return bad(res, 'bad path');
+    if (!docAccess(req, p.path, true) || (pathModule(p.path) === 'billing' && !can(req, 'billing', 2))) return denied(res);
     await pool.query('DELETE FROM docs WHERE path = $1', [p.path]);
     res.json({ ok: true });
   } catch (e) { next(e); }
@@ -248,6 +361,7 @@ app.delete('/api/doc', auth, csrf, async (req, res, next) => {
 app.get('/api/collection', auth, async (req, res, next) => {
   try {
     const p = parsePath(req.query.path, false); if (!p) return bad(res, 'bad path');
+    if (!docAccess(req, p.path + '/x', false)) return denied(res);
     const r = await pool.query('SELECT path, data FROM docs WHERE collection = $1 ORDER BY path LIMIT 5000', [p.path]);
     res.json({ docs: r.rows.map(x => ({ id: x.path.split('/').pop(), data: x.data })) });
   } catch (e) { next(e); }
@@ -458,6 +572,141 @@ async function runDueSources() {
   const day = israelDay(), hour = israelHour();
   for (const row of r.rows) { const s = row.data; if (s.lastDay !== day && hour >= (s.hour ?? 6)) { const x = await runSource(s); console.log('price list source', s.supplier, x.lastStatus, x.lastError || ''); } }
 }
+
+/* ---------- accounting: mail (SMTP send, IMAP receipts), receipt recognition with AI, expense files ---------- */
+const nodemailer = require('nodemailer');
+const { ImapFlow } = require('imapflow');
+const { simpleParser } = require('mailparser');
+const EXPIN_COL = 'data/users/team/root/expinbox', MAILLOG_COL = 'data/users/team/root/maillog';
+async function getSecret(key) { const r = await pool.query('SELECT value FROM secrets WHERE key = $1', [key]); if (!r.rows[0]) return null; try { return JSON.parse(r.rows[0].value); } catch (e) { return null; } }
+async function setSecret(key, val) { await pool.query(`INSERT INTO secrets (key, value, updated_at) VALUES ($1, $2, now()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, [key, JSON.stringify(val)]); }
+const mailPub = m => m ? { configured: !!(m.user && m.pass && m.smtpHost), user: m.user, fromName: m.fromName || '', fromEmail: m.fromEmail || m.user, smtpHost: m.smtpHost, smtpPort: m.smtpPort, imapHost: m.imapHost || '', imapPort: m.imapPort || 993, folder: m.folder || 'INBOX', poll: m.poll !== false, lastPoll: m.lastPoll || null, lastPollResult: m.lastPollResult || '' } : { configured: false };
+const smtpOf = m => nodemailer.createTransport({ host: m.smtpHost, port: +m.smtpPort || 465, secure: (+m.smtpPort || 465) === 465, auth: { user: m.user, pass: m.pass }, connectionTimeout: 20000, greetingTimeout: 20000 });
+app.get('/api/mail/status', auth, async (req, res, next) => { try { res.json(mailPub(await getSecret('mail'))); } catch (e) { next(e); } });
+app.put('/api/mail/settings', auth, csrf, express.json({ limit: '8kb' }), async (req, res, next) => {
+  try {
+    const b = req.body || {}, old = (await getSecret('mail')) || {};
+    const m = { user: str(b.user, 120), pass: b.pass ? String(b.pass).slice(0, 200) : old.pass, fromName: str(b.fromName, 80), fromEmail: str(b.fromEmail, 120) || str(b.user, 120),
+      smtpHost: str(b.smtpHost, 120), smtpPort: Math.round(+b.smtpPort || 465), imapHost: str(b.imapHost, 120), imapPort: Math.round(+b.imapPort || 993), folder: str(b.folder, 80) || 'INBOX', poll: b.poll !== false, lastPoll: old.lastPoll, lastPollResult: old.lastPollResult };
+    if (!m.user || !m.smtpHost) return bad(res, 'חסר משתמש או שרת SMTP');
+    await setSecret('mail', m); res.json(mailPub(m));
+  } catch (e) { next(e); }
+});
+app.post('/api/mail/test', auth, csrf, async (req, res, next) => {
+  try {
+    const m = await getSecret('mail'); if (!m || !m.pass) return bad(res, 'הגדרות המייל לא מלאות');
+    const out = { smtp: '', imap: '' };
+    try { await smtpOf(m).verify(); out.smtp = 'ok'; } catch (e) { out.smtp = e.message; }
+    if (m.imapHost) { const c = new ImapFlow({ host: m.imapHost, port: m.imapPort || 993, secure: (m.imapPort || 993) === 993, auth: { user: m.user, pass: m.pass }, logger: false, socketTimeout: 30000 });
+      try { await c.connect(); const st = await c.status(m.folder || 'INBOX', { messages: true, unseen: true }); out.imap = 'ok'; out.unseen = st.unseen; await c.logout(); } catch (e) { out.imap = e.message; try { await c.logout(); } catch (_) {} } }
+    res.json(out);
+  } catch (e) { next(e); }
+});
+const mailDay = { day: '', n: 0 };
+app.post('/api/mail/send', auth, csrf, express.json({ limit: '300kb' }), async (req, res, next) => {
+  try {
+    const m = await getSecret('mail'); if (!m || !m.pass) throw new SumitError('לא הוגדרה תיבת מייל. הגדר אותה במסך מחירון ← מייל.');
+    const b = req.body || {}, to = str(b.to, 200), subject = str(b.subject, 200), html = String(b.html || '').slice(0, 250000), text = String(b.text || '').slice(0, 100000);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return bad(res, 'כתובת מייל לא תקינה: ' + to);
+    if (!subject || (!html && !text)) return bad(res, 'חסר נושא או תוכן');
+    const today = new Date().toISOString().slice(0, 10); if (mailDay.day !== today) { mailDay.day = today; mailDay.n = 0; } if (++mailDay.n > 300) throw new SumitError('הגעת למגבלת 300 מיילים ביום');
+    const id = 'ml' + crypto.randomBytes(6).toString('hex'), entry = { id, to, subject, at: Date.now(), by: req.user.id, customerId: str(b.customerId, 40) || null, docId: str(b.docId, 40) || null, kind: str(b.kind, 30) || 'other' };
+    try {
+      const info = await smtpOf(m).sendMail({ from: (m.fromName ? '"' + m.fromName.replace(/"/g, '') + '" ' : '') + '<' + (m.fromEmail || m.user) + '>', to, subject, html: html || undefined, text: text || undefined, replyTo: m.fromEmail || m.user });
+      Object.assign(entry, { ok: true, messageId: info.messageId || '' });
+    } catch (e) { Object.assign(entry, { ok: false, error: e.message }); }
+    await writeDoc(MAILLOG_COL + '/' + id, entry, req.user.id);
+    if (!entry.ok) throw new SumitError('השליחה נכשלה: ' + entry.error);
+    res.json(entry);
+  } catch (e) { next(e); }
+});
+const EXP_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'application/pdf': 'pdf' };
+async function storeExpenseFile(buf, mime, userId) {
+  const blobId = crypto.randomBytes(16).toString('hex');
+  await fs.promises.writeFile(path.join(UPLOAD_DIR, blobId), buf, { flag: 'wx' });
+  await pool.query('INSERT INTO uploads (id, mime, size, created_by) VALUES ($1, $2, $3, $4)', [blobId, mime, buf.length, userId || null]);
+  return blobId;
+}
+const sniffMime = buf => { const h = buf.slice(0, 12); if (h.slice(0, 4).toString('latin1') === '%PDF') return 'application/pdf'; if (h[0] === 0xFF && h[1] === 0xD8) return 'image/jpeg'; if (h.slice(1, 4).toString('latin1') === 'PNG') return 'image/png'; if (h.slice(0, 4).toString('latin1') === 'RIFF' && h.slice(8, 12).toString('latin1') === 'WEBP') return 'image/webp'; return ''; };
+app.post('/api/expupload', auth, csrf, express.raw({ type: () => true, limit: '20mb' }), async (req, res, next) => {
+  try {
+    if (!Buffer.isBuffer(req.body) || req.body.length < 100) return bad(res, 'הקובץ ריק');
+    const mime = sniffMime(req.body); if (!EXP_TYPES[mime]) return bad(res, 'אפשר להעלות PDF או תמונה (jpg, png, webp)');
+    const blobId = await storeExpenseFile(req.body, mime, req.user.id);
+    res.json({ blobId, src: '/_blob/' + blobId, mime });
+  } catch (e) { next(e); }
+});
+let pollRunning = false;
+async function pollExpenseMail() {
+  if (pollRunning) return { skipped: true }; pollRunning = true;
+  const m = await getSecret('mail'); let result = '';
+  try {
+    if (!m || !m.pass || !m.imapHost || m.poll === false) return { skipped: true };
+    const c = new ImapFlow({ host: m.imapHost, port: m.imapPort || 993, secure: (m.imapPort || 993) === 993, auth: { user: m.user, pass: m.pass }, logger: false, socketTimeout: 60000 });
+    let files = 0, mails = 0;
+    await c.connect();
+    const lock = await c.getMailboxLock(m.folder || 'INBOX');
+    try {
+      const uids = await c.search({ seen: false }, { uid: true });
+      for (const uid of (uids || []).slice(0, 50)) {
+        const msg = await c.fetchOne(String(uid), { source: true }, { uid: true });
+        if (!msg || !msg.source) continue;
+        const mail = await simpleParser(msg.source);
+        const from = (mail.from && mail.from.text) || '', subject = mail.subject || '';
+        const atts = (mail.attachments || []).filter(a => EXP_TYPES[sniffMime(a.content)]);
+        for (const a of atts) {
+          const mime = sniffMime(a.content), blobId = await storeExpenseFile(a.content, mime, null);
+          const id = 'ex' + crypto.randomBytes(6).toString('hex');
+          await writeDoc(EXPIN_COL + '/' + id, { id, blobId, src: '/_blob/' + blobId, mime, fileName: (a.filename || ('receipt.' + EXP_TYPES[mime])).slice(0, 160), from: from.slice(0, 200), subject: subject.slice(0, 200), at: Date.now(), status: 'new', source: 'email' }, null);
+          files++;
+        }
+        if (!atts.length && (mail.html || mail.text)) {
+          const id = 'ex' + crypto.randomBytes(6).toString('hex');
+          await writeDoc(EXPIN_COL + '/' + id, { id, blobId: null, src: '', mime: 'text/plain', fileName: '', from: from.slice(0, 200), subject: subject.slice(0, 200), text: String(mail.text || '').slice(0, 20000), at: Date.now(), status: 'new', source: 'email' }, null);
+        }
+        await c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+        mails++;
+      }
+    } finally { lock.release(); }
+    await c.logout();
+    result = mails ? 'נקלטו ' + mails + ' מיילים, ' + files + ' קבצים' : 'אין מיילים חדשים';
+    return { mails, files };
+  } catch (e) { result = 'שגיאה: ' + e.message; throw e; }
+  finally {
+    pollRunning = false;
+    if (m) { m.lastPoll = Date.now(); m.lastPollResult = result; await setSecret('mail', m).catch(() => {}); }
+  }
+}
+app.post('/api/mail/poll', auth, csrf, async (req, res, next) => { try { res.json(await pollExpenseMail()); } catch (e) { next(new SumitError('קליטת המייל נכשלה: ' + e.message)); } });
+app.get('/api/ai/status', auth, async (req, res, next) => { try { const a = await getSecret('ai'); res.json({ configured: !!(a && a.apiKey), model: (a && a.model) || 'claude-haiku-4-5-20251001' }); } catch (e) { next(e); } });
+app.put('/api/ai/settings', auth, csrf, express.json({ limit: '4kb' }), async (req, res, next) => {
+  try { const b = req.body || {}, old = (await getSecret('ai')) || {};
+    if (b.remove) { await pool.query("DELETE FROM secrets WHERE key = 'ai'"); return res.json({ configured: false }); }
+    const a = { apiKey: b.apiKey ? String(b.apiKey).trim().slice(0, 200) : old.apiKey, model: str(b.model, 80) || old.model || 'claude-haiku-4-5-20251001' };
+    if (!a.apiKey) return bad(res, 'חסר מפתח'); await setSecret('ai', a); res.json({ configured: true, model: a.model });
+  } catch (e) { next(e); }
+});
+const RECEIPT_PROMPT = `You read an Israeli receipt or tax invoice (Hebrew or English). Return ONLY a JSON object, no markdown, with these keys:
+{"vendor": supplier business name, "vendorId": supplier company/ID number (ח.פ / ע.מ / עוסק מורשה, digits only) or "", "invoiceNumber": document number or "", "date": "YYYY-MM-DD" or "",
+"total": final amount paid including VAT (number), "vat": VAT amount (number, 0 if none), "currency": "ILS"/"USD"/"EUR", "docType": "invoice"|"receipt"|"invoice_receipt"|"other",
+"category": one of ["ציוד ומחשבים","תוכנה ומנויים","רכב ודלק","תקשורת וטלפון","משרד ואחזקה","שכירות","שיווק ופרסום","הנהלת חשבונות וייעוץ","ספקים וסחורה","נסיעות וחניה","אוכל ואירוח","אחר"],
+"description": short Hebrew description of what was bought}. Use null for numbers you cannot find.`;
+app.post('/api/ai/receipt', auth, csrf, express.json({ limit: '4kb' }), async (req, res, next) => {
+  try {
+    const a = await getSecret('ai'); if (!a || !a.apiKey) return bad(res, 'לא הוגדר מפתח API');
+    const blobId = String((req.body || {}).blobId || ''); if (!/^[a-f0-9]{32}$/.test(blobId)) return bad(res, 'bad file');
+    const u = (await pool.query('SELECT mime FROM uploads WHERE id = $1', [blobId])).rows[0]; if (!u) return bad(res, 'הקובץ לא נמצא');
+    const buf = await fs.promises.readFile(path.join(UPLOAD_DIR, blobId)); if (buf.length > 9e6) return bad(res, 'הקובץ גדול מדי לזיהוי');
+    const block = u.mime === 'application/pdf' ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: buf.toString('base64') } } : { type: 'image', source: { type: 'base64', media_type: u.mime, data: buf.toString('base64') } };
+    const r = await fetchT((process.env.ANTHROPIC_URL || 'https://api.anthropic.com') + '/v1/messages', 60000, { method: 'POST', headers: { 'x-api-key': a.apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: a.model || 'claude-haiku-4-5-20251001', max_tokens: 800, messages: [{ role: 'user', content: [block, { type: 'text', text: RECEIPT_PROMPT }] }] }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new SumitError('שירות הזיהוי החזיר שגיאה: ' + ((j.error && j.error.message) || r.status));
+    const txt = (j.content || []).filter(x => x.type === 'text').map(x => x.text).join('').replace(/```json|```/g, '').trim();
+    let data; try { data = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1)); } catch (e) { throw new SumitError('הזיהוי לא החזיר תוצאה קריאה'); }
+    res.json(data);
+  } catch (e) { next(e); }
+});
 
 /* ---------- product images: Icecat lookup by brand + manufacturer part number, or an image link ---------- */
 const PIMG_COL = 'data/users/team/root/pimages';
@@ -950,7 +1199,7 @@ async function cli(args) {
   if (cmd === 'adduser') {
     if (!a || !b) throw new Error('usage: adduser <email> <password> [name]');
     if (b.length < 8) throw new Error('password must be at least 8 characters');
-    await pool.query('INSERT INTO users (email, pass_hash, name) VALUES ($1, $2, $3)', [a.trim().toLowerCase(), hashPw(b), c || '']);
+    await pool.query("INSERT INTO users (email, pass_hash, name, role) VALUES ($1, $2, $3, 'admin')", [a.trim().toLowerCase(), hashPw(b), c || '']);
     console.log('user added:', a);
   } else if (cmd === 'passwd') {
     if (!a || !b) throw new Error('usage: passwd <email> <new-password>');
@@ -993,6 +1242,8 @@ async function main() {
   const autoSync = async () => { try { if (await getSumitCreds()) { try { const c = await syncCustomersFromSumit(null); console.log('sumit customers sync:', JSON.stringify(Object.assign({}, c.stats, { sampleKeys: undefined }))); } catch (e) { console.log('sumit customers sync failed:', e.message); } const r = await syncFromSumit(null, 120); console.log('sumit sync:', JSON.stringify(r.stats)); } } catch (e) { console.log('sumit sync failed:', e.message); } };
   if (process.env.SUMIT_AUTO_SYNC !== 'false') { setTimeout(autoSync, 90e3).unref(); setInterval(autoSync, 60 * 60e3).unref(); }
   const srcTick = () => runDueSources().catch(e => console.log('price list sources failed:', e.message));
+  const mailTick = () => pollExpenseMail().then(r => { if (r && r.mails) console.log('expense mail:', JSON.stringify(r)); }).catch(e => console.log('expense mail failed:', e.message));
+  setTimeout(mailTick, 2 * 60e3).unref(); setInterval(mailTick, 10 * 60e3).unref();
   setTimeout(srcTick, 60e3).unref(); setInterval(srcTick, 15 * 60e3).unref();
   const stop = () => { server.close(() => pool.end().then(() => process.exit(0))); setTimeout(() => process.exit(0), 5000).unref(); };
   process.on('SIGTERM', stop); process.on('SIGINT', stop);
