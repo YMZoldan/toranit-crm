@@ -2,9 +2,9 @@
 
 ## הדרך המהירה: שרת חדש (Kamatera או כל שרת Ubuntu)
 ```bash
-scp cameras-v1.17.0.zip root@SERVER-IP:/root/   # מהמחשב, ב-PowerShell
+scp cameras-v1.19.0.zip root@SERVER-IP:/root/   # מהמחשב, ב-PowerShell
 ssh root@SERVER-IP                             # התחברות לשרת
-apt-get install -y unzip && unzip -o cameras-v1.17.0.zip && bash cameras/install.sh
+apt-get install -y unzip && unzip -o cameras-v1.19.0.zip && bash cameras/install.sh
 ```
 הסקריפט שואל דומיין, אימייל וסיסמה, ומתקין: עדכונים, חומת אש, fail2ban, Docker,
 Traefik עם תעודת HTTPS, את האפליקציה, וגיבוי לילי. מריצים אותו שוב לעדכון גרסה.
@@ -69,6 +69,14 @@ docker compose logs -f app      # צריך להופיע: listening on 3000
 - **כל עדכון:** במחשב `publish-update.ps1 cameras-vX.Y.Z.zip`, ובשרת `cameras-update`.
 - **חזרה לגרסה קודמת:** `cameras-update v1.4.0`.
 - **בדיקת הגרסה המותקנת:** `cat /opt/cameras/VERSION`, או בתחתית סרגל הצד באפליקציה.
+
+## קבלות אוטומטיות
+כל קבלה מזוהה בשרת ונרשמת מיד. וואטסאפ למספר המערכת: הגדרות ← "וואטסאפ למספר המערכת" (Cloud API של Meta, מספר ייעודי).
+שיתוף מהטלפון: הגדרות ← "קבלות מהטלפון (שתף)".
+
+## וואטסאפ
+כפתורי "שלח בוואטסאפ" פותחים את WhatsApp Business במחשב או בטלפון עם הודעה מוכנה וקישור למסמך (/s/...).
+הקישורים בתוקף 60 יום. שליחה אוטומטית לגמרי דורשת WhatsApp Cloud API של Meta, בתשלום לפי הודעה.
 
 ## משתמשים והרשאות
 הגדרות ← "משתמשים והרשאות". משתמשים קיימים מהגרסאות הקודמות הם "מנהל מערכת".

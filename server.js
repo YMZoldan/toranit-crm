@@ -253,7 +253,7 @@ const ROUTE_RULES = [
   ['*', /^\/api\/extkeys/, ['settings'], 2], ['*', /^\/api\/plsources/, ['pricelist', 'settings'], 2],
   ['PUT', /^\/api\/mail\/settings/, ['settings'], 2], ['POST', /^\/api\/mail\/test/, ['settings'], 2], ['PUT', /^\/api\/ai\/settings/, ['settings'], 2],
   ['POST', /^\/api\/mail\/send/, ['billing'], 2], ['POST', /^\/api\/mail\/poll/, ['finance'], 2],
-  ['POST', /^\/api\/expupload/, ['finance'], 2], ['POST', /^\/api\/ai\/receipt/, ['finance'], 2],
+  ['POST', /^\/api\/expupload/, ['finance'], 2], ['PUT', /^\/api\/wa\/settings/, ['settings'], 2], ['POST', /^\/api\/wa\/test/, ['settings'], 2], ['POST', /^\/api\/ai\/receipt/, ['finance'], 2],
   ['POST', /^\/api\/productimage/, ['sales', 'pricelist'], 2], ['POST', /^\/api\/fetchproduct/, ['sales', 'pricelist'], 2],
   ['POST', /^\/api\/uploads/, ['projects', 'service', 'sales', 'pricelist', 'finance'], 2]
 ];
@@ -391,6 +391,49 @@ app.get('/_blob/:id', auth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/* ---------- public share links for documents (sent to customers by WhatsApp) ---------- */
+const SHARE_COL = 'data/users/team/shares';
+app.post('/api/share', auth, csrf, express.raw({ type: () => true, limit: '25mb' }), async (req, res, next) => {
+  try {
+    if (!['billing', 'sales', 'service', 'projects'].some(m => can(req, m, 2))) return denied(res);
+    if (!Buffer.isBuffer(req.body) || req.body.length < 100) return bad(res, 'הקובץ ריק');
+    const mime = sniffMime(req.body); if (!EXP_TYPES[mime]) return bad(res, 'אפשר לשתף PDF או תמונה');
+    const blobId = await storeExpenseFile(req.body, mime, req.user.id);
+    const token = crypto.randomBytes(18).toString('base64url');
+    const days = Math.min(365, Math.max(1, Math.round(+req.query.days || 60)));
+    const data = { token, blobId, mime, title: str(req.query.title, 160) || 'מסמך', customerId: str(req.query.customer, 40) || null, kind: str(req.query.kind, 30) || '', created: Date.now(), expires: Date.now() + days * 864e5, by: req.user.id, views: 0 };
+    await writeDoc(SHARE_COL + '/' + token, data, req.user.id);
+    const base = (req.get('x-forwarded-proto') || req.protocol) + '://' + req.get('host');
+    res.json({ token, url: base + '/s/' + token, expires: data.expires });
+  } catch (e) { next(e); }
+});
+app.delete('/api/share/:token', auth, csrf, async (req, res, next) => {
+  try { if (!/^[A-Za-z0-9_-]{20,40}$/.test(req.params.token)) return bad(res, 'bad token');
+    const r = await pool.query('SELECT data FROM docs WHERE path = $1', [SHARE_COL + '/' + req.params.token]); const d = r.rows[0] && r.rows[0].data;
+    if (!d) return res.json({ ok: true });
+    if (d.by !== req.user.id && !can(req, 'billing', 2) && !can(req, 'settings', 2)) return denied(res);
+    d.expires = Date.now() - 1; d.revoked = Date.now(); await writeDoc(SHARE_COL + '/' + d.token, d, req.user.id); res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+const shareHits = new Map();
+app.get('/s/:token', async (req, res, next) => {
+  try {
+    const ip = req.ip || 'x', now = Date.now(), h = (shareHits.get(ip) || []).filter(t => now - t < 60e3); h.push(now); shareHits.set(ip, h);
+    if (h.length > 30) return res.status(429).send('Too many requests');
+    const gone = msg => res.status(404).type('html').send('<!doctype html><html lang="he" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>המסמך לא זמין</title><body style="font-family:Arial,sans-serif;text-align:center;padding:40px;color:#272336"><h2>המסמך לא זמין</h2><p>' + msg + '</p></body></html>');
+    if (!/^[A-Za-z0-9_-]{20,40}$/.test(req.params.token)) return gone('הקישור לא תקין.');
+    const r = await pool.query('SELECT data FROM docs WHERE path = $1', [SHARE_COL + '/' + req.params.token]); const d = r.rows[0] && r.rows[0].data;
+    if (!d) return gone('הקישור לא תקין.');
+    if (d.expires < now) return gone('תוקף הקישור פג. פנה לשולח לקבלת קישור חדש.');
+    const file = path.join(UPLOAD_DIR, d.blobId);
+    d.views = (d.views || 0) + 1; d.lastView = now; pool.query('UPDATE docs SET data = $2::jsonb WHERE path = $1', [SHARE_COL + '/' + d.token, JSON.stringify(d)]).catch(() => {});
+    const ext = d.mime === 'application/pdf' ? '.pdf' : '.' + (EXP_TYPES[d.mime] || 'bin');
+    res.set({ 'Content-Type': d.mime, 'Content-Disposition': "inline; filename*=UTF-8''" + encodeURIComponent(String(d.title).replace(/[\\/:*?"<>|]/g, '_') + (String(d.title).toLowerCase().endsWith(ext) ? '' : ext)),
+      'Cache-Control': 'private, no-store', 'X-Robots-Tag': 'noindex, nofollow', 'Referrer-Policy': 'no-referrer' });
+    fs.createReadStream(file).on('error', () => gone('הקובץ לא נמצא.')).pipe(res);
+  } catch (e) { next(e); }
+});
+
 /* ---------- price-list inbox (Chrome extension uploads files with an extension key) ---------- */
 const EXT_COL = 'data/users/team/extkeys';
 const sha256 = s => crypto.createHash('sha256').update(String(s)).digest('hex');
@@ -423,6 +466,21 @@ async function extAuth(req, res, next) {
   } catch (e) { next(e); }
 }
 app.get('/api/ext/ping', extAuth, (req, res) => res.json({ ok: true, label: req.extKey.label }));
+/* receipts from a phone (iPhone Shortcut "Share -> Toranit receipt"), authenticated with an extension key */
+app.post('/api/receipt', extAuth, express.raw({ type: () => true, limit: '20mb' }), async (req, res, next) => {
+  try {
+    if (!Buffer.isBuffer(req.body) || req.body.length < 100) return bad(res, 'הקובץ ריק');
+    const mime = sniffMime(req.body);
+    if (!EXP_TYPES[mime]) return bad(res, 'אפשר לשלוח PDF או תמונה (jpg, png). באייפון, הוסף לקיצור הדרך פעולת "המר תמונה" ל-JPEG.');
+    const dec = v => { try { return decodeURIComponent(String(v || '')); } catch (e) { return String(v || ''); } };
+    const blobId = await storeExpenseFile(req.body, mime, null);
+    const r = await autoExpense({ buf: req.body, mime, blobId, fileName: dec(req.get('X-Filename')).slice(0, 160) || ('receipt.' + EXP_TYPES[mime]), from: req.extKey.label, subject: dec(req.get('X-Note')).slice(0, 200), source: 'phone' });
+    const x = r.expense, m = v => '₪' + (Math.round((+v || 0) * 100) / 100).toLocaleString('en-US');
+    res.json({ ok: true, duplicate: !!r.duplicate, message: r.duplicate ? 'הקבלה הזו כבר רשומה: ' + (x.vendor || '') + ' ' + m(x.total) : '✓ נרשמה הוצאה: ' + (x.vendor || 'ספק לא זוהה') + ' · ' + m(x.total) + ' · ' + x.category + (x.needsReview ? ' (לבדיקה: ' + x.reviewReason + ')' : '') });
+  } catch (e) { next(e); }
+});
+/* a share that reached the server (service worker not active yet): send the user back with a hint */
+app.post('/share-receipt', (req, res) => res.redirect(303, '/?share=retry'));
 /* the extension's "add to Toranit" button on supplier product pages */
 const WEB_COL = 'data/users/team/root/webitems', DEAL_COL = 'data/users/team/root/deals';
 app.get('/api/ext/deals', extAuth, async (req, res, next) => {
@@ -642,8 +700,10 @@ async function pollExpenseMail() {
   const m = await getSecret('mail'); let result = '';
   try {
     if (!m || !m.pass || !m.imapHost || m.poll === false) return { skipped: true };
+    const pending = Object.values(await readCollection(EXPIN_COL)).filter(x => x.status === 'new' && x.blobId);
+    for (const it of pending) { try { const buf = await fs.promises.readFile(path.join(UPLOAD_DIR, it.blobId)); await autoExpense({ buf, mime: it.mime, blobId: it.blobId, fileName: it.fileName, from: it.from, subject: it.subject, source: 'email' }); } catch (e) {} it.status = 'done'; await writeDoc(EXPIN_COL + '/' + it.id, it, null); }
     const c = new ImapFlow({ host: m.imapHost, port: m.imapPort || 993, secure: (m.imapPort || 993) === 993, auth: { user: m.user, pass: m.pass }, logger: false, socketTimeout: 60000 });
-    let files = 0, mails = 0;
+    let files = 0, mails = 0, recorded = 0, dups = 0;
     await c.connect();
     const lock = await c.getMailboxLock(m.folder || 'INBOX');
     try {
@@ -656,21 +716,20 @@ async function pollExpenseMail() {
         const atts = (mail.attachments || []).filter(a => EXP_TYPES[sniffMime(a.content)]);
         for (const a of atts) {
           const mime = sniffMime(a.content), blobId = await storeExpenseFile(a.content, mime, null);
-          const id = 'ex' + crypto.randomBytes(6).toString('hex');
-          await writeDoc(EXPIN_COL + '/' + id, { id, blobId, src: '/_blob/' + blobId, mime, fileName: (a.filename || ('receipt.' + EXP_TYPES[mime])).slice(0, 160), from: from.slice(0, 200), subject: subject.slice(0, 200), at: Date.now(), status: 'new', source: 'email' }, null);
-          files++;
+          const r = await autoExpense({ buf: a.content, mime, blobId, fileName: (a.filename || ('receipt.' + EXP_TYPES[mime])).slice(0, 160), from: from.slice(0, 200), subject: subject.slice(0, 200), source: 'email' });
+          files++; if (r.duplicate) dups++; else recorded++;
         }
-        if (!atts.length && (mail.html || mail.text)) {
-          const id = 'ex' + crypto.randomBytes(6).toString('hex');
-          await writeDoc(EXPIN_COL + '/' + id, { id, blobId: null, src: '', mime: 'text/plain', fileName: '', from: from.slice(0, 200), subject: subject.slice(0, 200), text: String(mail.text || '').slice(0, 20000), at: Date.now(), status: 'new', source: 'email' }, null);
+        if (!atts.length && mail.text && /סה["״]?כ|לתשלום|total|חשבונית|קבלה|invoice|receipt/i.test(mail.text)) {
+          const pr = parseReceiptText(mail.text);
+          if (pr.total > 0) { const r = await autoExpense({ text: mail.text.slice(0, 20000), mime: 'text/plain', from: from.slice(0, 200), subject: subject.slice(0, 200), source: 'email' }); if (r.duplicate) dups++; else recorded++; }
         }
         await c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
         mails++;
       }
     } finally { lock.release(); }
     await c.logout();
-    result = mails ? 'נקלטו ' + mails + ' מיילים, ' + files + ' קבצים' : 'אין מיילים חדשים';
-    return { mails, files };
+    result = mails ? 'נקלטו ' + mails + ' מיילים, נרשמו ' + recorded + ' הוצאות' + (dups ? ', ' + dups + ' כפולות דולגו' : '') : 'אין מיילים חדשים';
+    return { mails, files, recorded, dups };
   } catch (e) { result = 'שגיאה: ' + e.message; throw e; }
   finally {
     pollRunning = false;
@@ -691,20 +750,217 @@ const RECEIPT_PROMPT = `You read an Israeli receipt or tax invoice (Hebrew or En
 "total": final amount paid including VAT (number), "vat": VAT amount (number, 0 if none), "currency": "ILS"/"USD"/"EUR", "docType": "invoice"|"receipt"|"invoice_receipt"|"other",
 "category": one of ["ציוד ומחשבים","תוכנה ומנויים","רכב ודלק","תקשורת וטלפון","משרד ואחזקה","שכירות","שיווק ופרסום","הנהלת חשבונות וייעוץ","ספקים וסחורה","נסיעות וחניה","אוכל ואירוח","אחר"],
 "description": short Hebrew description of what was bought}. Use null for numbers you cannot find.`;
+async function aiRecognize(a, buf, mime) {
+  const block = mime === 'application/pdf' ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: buf.toString('base64') } } : { type: 'image', source: { type: 'base64', media_type: mime, data: buf.toString('base64') } };
+  const r = await fetchT((process.env.ANTHROPIC_URL || 'https://api.anthropic.com') + '/v1/messages', 60000, { method: 'POST', headers: { 'x-api-key': a.apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: a.model || 'claude-haiku-4-5-20251001', max_tokens: 800, messages: [{ role: 'user', content: [block, { type: 'text', text: RECEIPT_PROMPT }] }] }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new SumitError('שירות הזיהוי החזיר שגיאה: ' + ((j.error && j.error.message) || r.status));
+  const txt = (j.content || []).filter(x => x.type === 'text').map(x => x.text).join('').replace(/```json|```/g, '').trim();
+  try { return JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1)); } catch (e) { throw new SumitError('הזיהוי לא החזיר תוצאה קריאה'); }
+}
+
+/* ---------- automatic receipts: recognize on the server and record the expense, no screen needed ---------- */
+const os = require('os');
+const EXP_COL = 'data/users/team/root/expenses';
+const EXP_CATS = ['ציוד ומחשבים','תוכנה ומנויים','רכב ודלק','תקשורת וטלפון','משרד ואחזקה','שכירות','שיווק ופרסום','הנהלת חשבונות וייעוץ','ספקים וסחורה','נסיעות וחניה','אוכל ואירוח','אחר'];
+let tessDir = null;
+function tessdata() {
+  if (tessDir) return tessDir;
+  const dir = path.join(os.tmpdir(), 'tessdata'); fs.mkdirSync(dir, { recursive: true });
+  for (const l of ['heb', 'eng']) { const dst = path.join(dir, l + '.traineddata.gz'); if (!fs.existsSync(dst)) fs.copyFileSync(path.join(path.dirname(require.resolve('@tesseract.js-data/' + l + '/package.json')), '4.0.0_best_int', l + '.traineddata.gz'), dst); }
+  return (tessDir = dir);
+}
+let ocrChain = Promise.resolve();
+const ocrQueue = fn => { const run = ocrChain.then(fn, fn); ocrChain = run.catch(() => {}); return run; };
+async function ocrPass(buf, lang) {
+  const { createWorker } = require('tesseract.js');
+  const w = await createWorker(lang, 1, { langPath: tessdata(), gzip: true, cachePath: path.join(os.tmpdir(), 'tesscache'), logger: () => {}, errorHandler: () => {} });
+  try { const r = await w.recognize(buf); return r.data.lines.map(l => ({ y: l.bbox.y0, h: l.bbox.y1 - l.bbox.y0, text: String(l.text || '').trim() })); } finally { await w.terminate(); }
+}
+const HEB = /[\u0590-\u05FF]/, NUMTOK = /^[(]?[-+]?\d[\d,./:%]*[)]?$/;
+/* Hebrew words come from the Hebrew pass (visual order, so each word and the word order are reversed); numbers come from the English pass, which reads digits reliably */
+async function ocrReceipt(buf) {
+  return ocrQueue(async () => {
+    const he = await ocrPass(buf, 'heb'), en = await ocrPass(buf, 'eng');
+    const lines = [];
+    he.forEach(l => {
+      const words = l.text.split(/\s+/).filter(t => HEB.test(t)).reverse().map(t => [...t].reverse().join('').replace(/^[|]+|[|]+$/g, ''));
+      const tol = Math.max(14, l.h * 0.7), e = en.find(x => Math.abs(x.y - l.y) <= tol);
+      const nums = e ? e.text.split(/\s+/).filter(t => NUMTOK.test(t)) : l.text.split(/\s+/).filter(t => NUMTOK.test(t));
+      lines.push({ y: l.y, text: (words.join(' ') + ' ' + nums.join(' ')).trim() });
+    });
+    en.forEach(e => { if (!lines.some(l => Math.abs(l.y - e.y) <= Math.max(14, e.h * 0.7)) && /[A-Za-z]{3}|\d/.test(e.text)) lines.push({ y: e.y, text: e.text }); });
+    const hebrewDoc = he.some(l => HEB.test(l.text) && l.text.replace(/[^\u0590-\u05FF]/g, '').length > 3);
+    return hebrewDoc ? lines.sort((a, b) => a.y - b.y).map(l => l.text).join('\n') : en.map(l => l.text).join('\n');
+  });
+}
+async function pdfTextServer(buf) {
+  const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buf), isEvalSupported: false, disableFontFace: true, useSystemFonts: false }).promise; let out = '';
+  for (let i = 1; i <= Math.min(doc.numPages, 3); i++) { const tc = await (await doc.getPage(i)).getTextContent(); const rows = {};
+    tc.items.forEach(it => { const y = Math.round(it.transform[5] / 3); (rows[y] = rows[y] || []).push(it); });
+    out += Object.keys(rows).sort((a, b) => b - a).map(y => rows[y].sort((a, b) => a.transform[4] - b.transform[4]).map(it => it.str).join(' ')).join('\n') + '\n'; }
+  return out;
+}
+/* a scanned PDF usually holds the page as one embedded picture: take the largest one from page 1 and turn it into a PNG for OCR */
+async function pdfScanImage(buf) {
+  const pdfjs = require('pdfjs-dist/legacy/build/pdf.js'), { PNG } = require('pngjs');
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buf), isEvalSupported: false, disableFontFace: true }).promise;
+  const page = await doc.getPage(1), ops = await page.getOperatorList();
+  const names = []; ops.fnArray.forEach((fn, i) => { if (fn === pdfjs.OPS.paintImageXObject || fn === pdfjs.OPS.paintJpegXObject) names.push(ops.argsArray[i][0]); });
+  let best = null;
+  for (const n of names) {
+    const img = await new Promise(res => { try { page.objs.get(n, o => res(o)); } catch (e) { try { page.commonObjs.get(n, o => res(o)); } catch (_) { res(null); } } setTimeout(() => res(null), 5000); });
+    if (img && img.data && (!best || img.width * img.height > best.width * best.height)) best = img;
+  }
+  if (!best || best.width < 200 || best.height < 200) return null;
+  const { width: w, height: h, data: d } = best, png = new PNG({ width: w, height: h }), px = w * h;
+  if (d.length >= px * 4) png.data = Buffer.from(d.buffer, d.byteOffset, px * 4);
+  else if (d.length >= px * 3) { for (let i = 0; i < px; i++) { png.data[i * 4] = d[i * 3]; png.data[i * 4 + 1] = d[i * 3 + 1]; png.data[i * 4 + 2] = d[i * 3 + 2]; png.data[i * 4 + 3] = 255; } }
+  else if (d.length >= px) { for (let i = 0; i < px; i++) { png.data[i * 4] = png.data[i * 4 + 1] = png.data[i * 4 + 2] = d[i]; png.data[i * 4 + 3] = 255; } }
+  else { const row = Math.ceil(w / 8); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const v = (d[y * row + (x >> 3)] >> (7 - (x & 7))) & 1 ? 255 : 0; const i = y * w + x; png.data[i * 4] = png.data[i * 4 + 1] = png.data[i * 4 + 2] = v; png.data[i * 4 + 3] = 255; } }
+  return PNG.sync.write(png);
+}
+function parseReceiptText(raw) {
+  const text = String(raw || '').replace(/\r/g, ''), lines = text.split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const nums = l => (String(l).replace(/(?<![\d.,])\d{8,}(?![\d.,])/g, ' ').match(/(?<![\d.,])(?:\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+\.\d{1,2}|\d{2,7})(?![\d,]|\.\d)/g) || []).map(s => +s.replace(/,/g, '')).filter(v => v > 0 && v < 1e7);
+  const r = { vendor: '', vendorId: '', invoiceNumber: '', date: '', total: null, vat: null, description: '' };
+  const totLine = lines.filter(l => /סה["״׳']?כ\s*(לתשלום|כולל)|לתשלום|total|סכום\s*כולל|סה["״׳']?כ/i.test(l) && !/לפני\s*מע|before\s*vat|subtotal/i.test(l) && nums(l).length);
+  if (totLine.length) { const c = totLine.flatMap(nums).filter(v => !(v >= 17 && v <= 18 && Number.isInteger(v))); if (c.length) r.total = Math.max(...c); }
+  if (r.total == null) { const all = lines.flatMap(nums).filter(v => v < 500000 && !(v > 1900 && v < 2100 && Number.isInteger(v))); if (all.length) r.total = Math.max(...all); }
+  const vatLine = lines.find(l => /מע["״׳']?מ|vat/i.test(l) && !/לא\s*כולל|פטור|vat\s*(no|number|id|reg)|עוסק|מס['׳]?\s*עוסק|ע\.?מ|לפני\s*מע|כולל\s*מע|ללא\s*מע|before\s*vat|excl|incl/i.test(l) && nums(l).some(v => v !== 17 && v !== 18 && v < (r.total || Infinity)));
+  if (vatLine) { const v = nums(vatLine).filter(v => v !== 17 && v !== 18 && v < (r.total || Infinity)); if (v.length) r.vat = Math.max(...v); }
+  const dm = /(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/.exec(text); if (dm) { const y = dm[3].length === 2 ? '20' + dm[3] : dm[3], mo = +dm[2], da = +dm[1]; if (mo >= 1 && mo <= 12 && da >= 1 && da <= 31) r.date = y + '-' + String(mo).padStart(2, '0') + '-' + String(da).padStart(2, '0'); }
+  const im = /(חשבונית(?:\s*מס)?(?:\s*\/?\s*קבלה)?|קבלה|מס['׳"]?\s*מסמך|invoice|receipt)[^\d\n]{0,16}(\d{3,12})/i.exec(text); if (im) r.invoiceNumber = im[2];
+  const vm = /(ע\.?\s?מ\.?|ח\.?\s?פ\.?|עוסק\s*מורשה|מס['׳]?\s*עוסק|vat\s*(?:no|number)|tax\s*id)[^\d\n]{0,10}(\d{8,9})/i.exec(text); if (vm) r.vendorId = vm[2];
+  r.vendor = (lines.find(l => /[A-Za-z\u0590-\u05FF]{3}/.test(l) && !/חשבונית|קבלה|invoice|receipt|תאריך|date|עוסק|ע\.מ|ח\.פ|טלפון|tel|כתובת|www\.|@|סה["״]?כ/i.test(l) && l.length <= 50) || '').replace(/\s+\d[\d\s.,/:-]*$/, '').slice(0, 80);
+  return r;
+}
+const normV = s => String(s || '').replace(/["'״׳`]/g, '').replace(/בע"?מ|בעמ|ltd\.?|inc\.?/gi, '').replace(/\s+/g, ' ').trim().toLowerCase();
+function guessCategory(vendor, text, existing) {
+  const prev = existing.filter(x => x.vendor && vendor && normV(x.vendor) === normV(vendor)).sort((a, b) => (b.updated || 0) - (a.updated || 0))[0];
+  if (prev && prev.category) return prev.category;
+  const t = (vendor + ' ' + (text || '')).toLowerCase();
+  const R = [['משרד ואחזקה', /משרד|ניקיון|אופיס דיפו|office depot|נייר|דיו|טונר|toner|paper/], ['רכב ודלק', /דלק|תדלוק|פז\b|פז |סונול|דור אלון|delek|ten |yellow|מוסך|צמיגים|בנזין|סולר/], ['תקשורת וטלפון', /בזק|סלקום|פרטנר|הוט|גולן|019|012|אינטרנט|cellcom|partner|bezeq/],
+    ['תוכנה ומנויים', /microsoft|google|adobe|aws|amazon web|zoom|office\s*365|office365|ms office|dropbox|github|openai|anthropic|godaddy|cloudflare|kamatera|מנוי|subscription|eset|gamers/],
+    ['ציוד ומחשבים', /ksp|ivory|באג|bug|מחשב|מורלוי|ביטק|גרנד|b-tech|morlevi|grand/], ['נסיעות וחניה', /חניה|פנגו|cellopark|רב.?קו|רכבת|מונית|gett|כביש 6|מנהרות/],
+    ['אוכל ואירוח', /מסעד|קפה|cafe|פיצה|wolt|תן ביס|10bis|סופר|שופרסל|רמי לוי/], ['שיווק ופרסום', /facebook|meta|פרסום|google ads|שיווק|דפוס/]];
+  const hit = R.find(r => r[1].test(t)); return hit ? hit[0] : 'אחר';
+}
+async function recognizeReceipt(buf, mime, extraText) {
+  const a = await getSecret('ai');
+  if (a && a.apiKey && buf) {
+    try { const x = await aiRecognize(a, buf, mime);
+      return { by: 'ai', vendor: x.vendor || '', vendorId: String(x.vendorId || '').replace(/\D/g, ''), invoiceNumber: String(x.invoiceNumber || ''), date: x.date || '', total: x.total != null ? +x.total : null, vat: x.vat != null ? +x.vat : null, category: EXP_CATS.includes(x.category) ? x.category : '', description: x.description || '' };
+    } catch (e) { console.log('ai receipt failed, falling back:', e.message); }
+  }
+  let text = extraText || '', by = 'text';
+  if (buf && mime === 'application/pdf') {
+    try { text = await pdfTextServer(buf); by = 'pdf'; } catch (e) { text = ''; }
+    if (text.replace(/\s/g, '').length < 20) {
+      try { const img = await pdfScanImage(buf); if (img) { text = await ocrReceipt(img); by = 'ocr-pdf'; } } catch (e) { console.log('scanned pdf ocr failed:', e.message); }
+      if (text.replace(/\s/g, '').length < 20) return { by: 'scanned' };
+    }
+  }
+  else if (buf && /^image\//.test(mime)) { try { text = await ocrReceipt(buf); by = 'ocr'; } catch (e) { console.log('ocr failed:', e.message); return { by: 'failed' }; } }
+  return Object.assign({ by, _text: text.slice(0, 4000) }, parseReceiptText(text));
+}
+async function autoExpense(o) {
+  const existing = Object.values(await readCollection(EXP_COL));
+  const r = await recognizeReceipt(o.buf, o.mime, o.text);
+  const vatPct = 18, total = r.total > 0 ? Math.round(r.total * 100) / 100 : 0;
+  const x = { id: 'xp' + crypto.randomBytes(6).toString('hex'), date: r.date || new Date().toISOString().slice(0, 10), vendor: r.vendor || '', vendorId: r.vendorId || '', invoiceNumber: r.invoiceNumber || '',
+    total, vat: r.vat != null ? Math.round(r.vat * 100) / 100 : (total ? Math.round((total - total / (1 + vatPct / 100)) * 100) / 100 : 0), payment: 'card',
+    notes: r.description || (o.subject ? 'מייל: ' + o.subject : o.source === 'whatsapp' ? 'נשלח בוואטסאפ' : ''), src: o.blobId ? '/_blob/' + o.blobId : '', mime: o.mime || '', fileName: o.fileName || '', source: o.source || 'upload',
+    recognizedBy: r.by, created: Date.now(), updated: Date.now() };
+  x.category = r.category || guessCategory(x.vendor, (r._text || '') + ' ' + (o.subject || '') + ' ' + (o.from || ''), existing);
+  const missing = [!x.total && 'סכום', !r.date && 'תאריך', !x.vendor && 'ספק'].filter(Boolean);
+  x.needsReview = missing.length > 0; if (missing.length) x.reviewReason = r.by === 'scanned' ? 'לא נמצא טקסט קריא בקובץ' : 'לא זוהו: ' + missing.join(', ');
+  const dup = existing.find(y => (x.invoiceNumber && y.invoiceNumber === x.invoiceNumber && (y.vendorId && y.vendorId === x.vendorId || normV(y.vendor) === normV(x.vendor))) || (x.total && Math.abs((+y.total || 0) - x.total) < 0.01 && y.date === x.date && normV(y.vendor) === normV(x.vendor)));
+  if (dup) return { duplicate: true, expense: dup };
+  await writeDoc(EXP_COL + '/' + x.id, x, o.userId || null);
+  return { expense: x };
+}
+app.post('/api/expauto', auth, csrf, express.raw({ type: () => true, limit: '20mb' }), async (req, res, next) => {
+  try {
+    if (!can(req, 'finance', 2)) return denied(res);
+    if (!Buffer.isBuffer(req.body) || req.body.length < 100) return bad(res, 'הקובץ ריק');
+    const mime = sniffMime(req.body); if (!EXP_TYPES[mime]) return bad(res, 'אפשר להעלות PDF או תמונה (jpg, png, webp)');
+    const blobId = await storeExpenseFile(req.body, mime, req.user.id);
+    res.json(await autoExpense({ buf: req.body, mime, blobId, fileName: str(req.query.name, 160), source: 'upload', userId: req.user.id }));
+  } catch (e) { next(e); }
+});
+
+/* ---------- WhatsApp Cloud API: receipts sent to the system's number are recorded and answered ---------- */
+const waGraph = w => (process.env.WA_GRAPH_URL || 'https://graph.facebook.com') + '/' + ((w && w.version) || 'v21.0');
+const waDigits = s => String(s || '').replace(/\D/g, '').replace(/^0/, '972');
+const waPub = w => w ? { configured: !!(w.phoneNumberId && w.token), phoneNumberId: w.phoneNumberId || '', allowed: w.allowed || [], verifyToken: w.verifyToken || '', hasSecret: !!w.appSecret, version: w.version || 'v21.0', lastIn: w.lastIn || null, lastResult: w.lastResult || '' } : { configured: false };
+async function waConfig() { let w = await getSecret('wa'); if (!w) w = {}; if (!w.verifyToken) { w.verifyToken = crypto.randomBytes(16).toString('hex'); await setSecret('wa', w); } return w; }
+async function waSend(w, to, payload) {
+  const r = await fetchT(waGraph(w) + '/' + encodeURIComponent(w.phoneNumberId) + '/messages', 20000, { method: 'POST', headers: { Authorization: 'Bearer ' + w.token, 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ messaging_product: 'whatsapp', to }, payload)) });
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error((j.error && j.error.message) || ('WhatsApp ' + r.status)); return j;
+}
+const waText = (w, to, body) => waSend(w, to, { type: 'text', text: { body: String(body).slice(0, 4000) } }).catch(e => console.log('whatsapp reply failed:', e.message));
+app.get('/api/wa/status', auth, async (req, res, next) => { try { res.json(waPub(await waConfig())); } catch (e) { next(e); } });
+app.put('/api/wa/settings', auth, csrf, express.json({ limit: '8kb' }), async (req, res, next) => {
+  try { const b = req.body || {}, w = await waConfig();
+    Object.assign(w, { phoneNumberId: str(b.phoneNumberId, 40).replace(/\D/g, ''), version: /^v\d{1,2}\.\d$/.test(b.version || '') ? b.version : (w.version || 'v21.0'),
+      allowed: String(b.allowed || '').split(/[,;\n]+/).map(waDigits).filter(x => x.length >= 9).slice(0, 10) });
+    if (b.token) w.token = String(b.token).trim().slice(0, 600); if (b.appSecret) w.appSecret = String(b.appSecret).trim().slice(0, 100);
+    await setSecret('wa', w); res.json(waPub(w));
+  } catch (e) { next(e); }
+});
+app.post('/api/wa/test', auth, csrf, async (req, res, next) => {
+  try { const w = await waConfig(); if (!w.token || !w.phoneNumberId || !(w.allowed || [])[0]) return bad(res, 'חסרים מזהה מספר, טוקן או מספר מורשה');
+    await waSend(w, w.allowed[0], { type: 'template', template: { name: 'hello_world', language: { code: 'en_US' } } }); res.json({ ok: true, to: w.allowed[0] });
+  } catch (e) { next(new SumitError('השליחה נכשלה: ' + e.message)); }
+});
+app.get('/api/wa/webhook', async (req, res) => {
+  const w = await getSecret('wa');
+  if (req.query['hub.mode'] === 'subscribe' && w && w.verifyToken && req.query['hub.verify_token'] === w.verifyToken) return res.type('text').send(String(req.query['hub.challenge'] || ''));
+  res.status(403).send('forbidden');
+});
+const waSeen = new Map();
+app.post('/api/wa/webhook', express.raw({ type: () => true, limit: '2mb' }), async (req, res) => {
+  const w = await getSecret('wa');
+  if (!w || !w.token) return res.sendStatus(200);
+  if (w.appSecret) {
+    const sig = String(req.get('x-hub-signature-256') || ''), mac = 'sha256=' + crypto.createHmac('sha256', w.appSecret).update(req.body || Buffer.alloc(0)).digest('hex');
+    if (sig.length !== mac.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(mac))) return res.sendStatus(401);
+  }
+  res.sendStatus(200);
+  let j; try { j = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '{}'); } catch (e) { return; }
+  const msgs = []; (j.entry || []).forEach(e => (e.changes || []).forEach(c => ((c.value || {}).messages || []).forEach(m => msgs.push(m))));
+  for (const m of msgs) {
+    try {
+      if (!m.id || waSeen.has(m.id)) continue; waSeen.set(m.id, Date.now()); if (waSeen.size > 500) waSeen.delete(waSeen.keys().next().value);
+      const from = waDigits(m.from);
+      if ((w.allowed || []).length && !w.allowed.includes(from)) { console.log('whatsapp: ignored message from', from); continue; }
+      const media = m.image || m.document;
+      if (!media) { await waText(w, from, 'שלום! שלח לכאן צילום או PDF של קבלה או חשבונית, והיא תירשם אוטומטית בהוצאות.'); continue; }
+      const meta = await (await fetchT(waGraph(w) + '/' + encodeURIComponent(media.id), 20000, { headers: { Authorization: 'Bearer ' + w.token } })).json();
+      if (!meta.url) throw new Error('media not found');
+      const buf = Buffer.from(await (await fetchT(meta.url, 60000, { headers: { Authorization: 'Bearer ' + w.token, 'User-Agent': 'Mozilla/5.0 (Toranit CRM)' } })).arrayBuffer());
+      const mime = sniffMime(buf);
+      if (!EXP_TYPES[mime]) { await waText(w, from, 'הקובץ לא נתמך. אפשר לשלוח תמונה (JPG/PNG) או PDF.'); continue; }
+      const blobId = await storeExpenseFile(buf, mime, null);
+      const r = await autoExpense({ buf, mime, blobId, fileName: (media.filename || ('whatsapp-' + new Date().toISOString().slice(0, 10) + '.' + EXP_TYPES[mime])).slice(0, 160), from: '+' + from, subject: str(media.caption, 200), source: 'whatsapp' });
+      const x = r.expense, money = v => '₪' + (Math.round((+v || 0) * 100) / 100).toLocaleString('en-US');
+      await waText(w, from, r.duplicate ? 'הקבלה הזו כבר רשומה: ' + (x.vendor || '') + ' · ' + money(x.total) + ' · ' + x.date
+        : '✓ נרשמה הוצאה: ' + (x.vendor || 'ספק לא זוהה') + ' · ' + money(x.total) + ' · ' + x.category + (x.date ? ' · ' + x.date.split('-').reverse().join('/') : '') + (x.needsReview ? '\n⚠ לבדיקה: ' + x.reviewReason : ''));
+      w.lastIn = Date.now(); w.lastResult = r.duplicate ? 'כפולה' : (x.vendor || '') + ' ' + money(x.total); await setSecret('wa', Object.assign(await getSecret('wa') || {}, { lastIn: w.lastIn, lastResult: w.lastResult }));
+    } catch (e) { console.log('whatsapp receipt failed:', e.message); try { await waText(w, waDigits(m.from), 'לא הצלחתי לקלוט את הקובץ. נסה שוב, או העלה אותו במסך ההוצאות.'); } catch (_) {} }
+  }
+});
+
 app.post('/api/ai/receipt', auth, csrf, express.json({ limit: '4kb' }), async (req, res, next) => {
   try {
     const a = await getSecret('ai'); if (!a || !a.apiKey) return bad(res, 'לא הוגדר מפתח API');
     const blobId = String((req.body || {}).blobId || ''); if (!/^[a-f0-9]{32}$/.test(blobId)) return bad(res, 'bad file');
     const u = (await pool.query('SELECT mime FROM uploads WHERE id = $1', [blobId])).rows[0]; if (!u) return bad(res, 'הקובץ לא נמצא');
     const buf = await fs.promises.readFile(path.join(UPLOAD_DIR, blobId)); if (buf.length > 9e6) return bad(res, 'הקובץ גדול מדי לזיהוי');
-    const block = u.mime === 'application/pdf' ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: buf.toString('base64') } } : { type: 'image', source: { type: 'base64', media_type: u.mime, data: buf.toString('base64') } };
-    const r = await fetchT((process.env.ANTHROPIC_URL || 'https://api.anthropic.com') + '/v1/messages', 60000, { method: 'POST', headers: { 'x-api-key': a.apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: a.model || 'claude-haiku-4-5-20251001', max_tokens: 800, messages: [{ role: 'user', content: [block, { type: 'text', text: RECEIPT_PROMPT }] }] }) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new SumitError('שירות הזיהוי החזיר שגיאה: ' + ((j.error && j.error.message) || r.status));
-    const txt = (j.content || []).filter(x => x.type === 'text').map(x => x.text).join('').replace(/```json|```/g, '').trim();
-    let data; try { data = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1)); } catch (e) { throw new SumitError('הזיהוי לא החזיר תוצאה קריאה'); }
-    res.json(data);
+    res.json(await aiRecognize(a, buf, u.mime));
   } catch (e) { next(e); }
 });
 

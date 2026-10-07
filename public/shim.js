@@ -168,6 +168,8 @@
   const caps = { db, user, assets, downloads, sumit, inbox };
   window.__fetchProduct = url => api('POST', '/api/fetchproduct', { url });
   window.__productImage = req => api('POST', '/api/productimage', req);
+  window.__share = (blob, title, customerId, kind) => api('POST', '/api/share?title=' + encodeURIComponent(title || '') + '&customer=' + encodeURIComponent(customerId || '') + '&kind=' + encodeURIComponent(kind || ''), blob, blob.type || 'application/pdf');
+  window.__unshare = token => api('DELETE', '/api/share/' + encodeURIComponent(token));
   window.__users = {
     list: () => api('GET', '/api/users'), create: u => api('POST', '/api/users', u), update: (id, u) => api('PUT', '/api/users/' + encodeURIComponent(id), u),
     changeMyPassword: (current, password) => api('POST', '/api/me/password', { current, password })
@@ -176,7 +178,9 @@
     mailStatus: () => api('GET', '/api/mail/status'), mailSave: m => api('PUT', '/api/mail/settings', m), mailTest: () => api('POST', '/api/mail/test'),
     mailSend: m => api('POST', '/api/mail/send', m), mailPoll: () => api('POST', '/api/mail/poll'),
     aiStatus: () => api('GET', '/api/ai/status'), aiSave: a => api('PUT', '/api/ai/settings', a), aiReceipt: blobId => api('POST', '/api/ai/receipt', { blobId }),
-    upload: async file => api('POST', '/api/expupload', await file.arrayBuffer(), 'application/octet-stream')
+    upload: async file => api('POST', '/api/expupload', await file.arrayBuffer(), 'application/octet-stream'),
+    auto: async file => api('POST', '/api/expauto?name=' + encodeURIComponent(file.name || ''), await file.arrayBuffer(), 'application/octet-stream'),
+    waStatus: () => api('GET', '/api/wa/status'), waSave: w => api('PUT', '/api/wa/settings', w), waTest: () => api('POST', '/api/wa/test')
   };
   window.claude = Object.freeze({
     use: async name => {

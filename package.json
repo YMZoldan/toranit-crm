@@ -11,10 +11,15 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
+    "@tesseract.js-data/heb": "^1.0.0",
     "express": "^4.21.2",
     "imapflow": "^1.7.8",
     "mailparser": "^3.9.36",
     "nodemailer": "^6.10.1",
-    "pg": "^8.13.1"
+    "pdfjs-dist": "^3.11.174",
+    "pg": "^8.13.1",
+    "pngjs": "^7.0.0",
+    "tesseract.js": "^5.1.1"
   }
 }

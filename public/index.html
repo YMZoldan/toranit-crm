@@ -1688,7 +1688,7 @@ function renderPricing(pg){
   let h = '<div class="pg"><div class="pghead"><div><h2 style="margin:0">תמחור והצעת מחיר</h2><p class="muted">'+esc(s.name)+'</p>'+
     '<label class="chk" style="margin-top:6px">סטטוס <select data-b="status">'+Object.keys(STATUS).map(k => '<option value="'+k+'">'+STATUS[k]+'</option>').join('')+'</select></label></div>'+
     '<div class="btns" style="margin:0">'+(sumitReady() ? '<button class="primary" id="gSQuote">הצעת מחיר דרך סאמיט</button><button id="gSPay">דרישת תשלום</button><button id="gSRec">קבלה</button>' : '')+
-    '<button'+(sumitReady() ? '' : ' class="primary"')+' id="gQuote">הצעת מחיר (PDF)</button><button id="gInternal">דוח פנימי (PDF)</button><button id="gCsv">טבלה לאקסל (CSV)</button></div></div><div id="pgMsg"></div>';
+    '<button'+(sumitReady() ? '' : ' class="primary"')+' id="gQuote">הצעת מחיר (PDF)</button><button id="gQuoteWa">שלח בוואטסאפ</button><button id="gInternal">דוח פנימי (PDF)</button><button id="gCsv">טבלה לאקסל (CSV)</button></div></div><div id="pgMsg"></div>';
   const custList = Object.values(customers).filter(c => !c._new && c.name).sort((a,b) => a.name.localeCompare(b.name, 'he'));
   h += card('לקוח', '<div class="frm"><label>לקוח מהרשימה<select id="pCust"><option value="">בחר לקוח...</option>'+custList.map(c => '<option value="'+c.id+'"'+(c.id === s.customerId ? ' selected' : '')+'>'+esc(c.name)+'</option>').join('')+'</select></label></div>'+
     '<p class="muted" style="margin-top:6px">'+(s.customerId && customers[s.customerId] ? 'הפרטים למטה מולאו מכרטיס הלקוח. <a href="#" id="pCustOpen">פתח כרטיס לקוח</a>' : 'בחירת לקוח ממלאת את הפרטים למטה ומקשרת את הפרויקט לכרטיס שלו.')+'</p>');
@@ -1741,6 +1741,8 @@ function renderPricing(pg){
   $('#addCustom').addEventListener('click', () => { state.custom.push({id:uid('u'), name:'', qty:1, unit:'יח׳', cost:0}); save(); renderPricing(pg); });
   pg.querySelectorAll('[data-delc]').forEach(b => b.addEventListener('click', () => { state.custom.splice(+b.dataset.delc, 1); save(); renderPricing(pg); }));
   $('#gQuote').addEventListener('click', runJob($('#gQuote'), makeQuote));
+  $('#gQuoteWa').addEventListener('click', () => { const cl = state.client || {}, cid = state.customerId, nm = cl.contact || cl.name || (customers[cid] || {}).name || '';
+    sendPdfWhatsApp({gen:makeQuote, phone:customerPhone(cid, cl.phone), customerId:cid, kind:'quote', text:'שלום ' + nm + ',\nמצורפת הצעת המחיר' + (state.name ? ' עבור ' + state.name : '') + ' מ' + (cat.company.name || '') + '. אשמח לענות על כל שאלה.'}); });
   $('#pCust').addEventListener('change', e => { const c = customers[e.target.value]; state.customerId = c ? c.id : null;
     if (c) state.client = {name:c.name, phone:c.phone || '', email:c.email || '', address:[c.address, c.city].filter(Boolean).join(', ')};
     save(); renderPricing(pg); });
@@ -1874,7 +1876,7 @@ const SET_TREE = [
   ['העסק', [['company','פרטי העסק'], ['vat','מע״מ ורווח'], ['labor','תמחור עבודה בפרויקטים'], ['counters','מונים לפרויקט'], ['billingSet','גבייה ותבניות מייל']]],
   ['מכירות', [['salesMargins','רווח ואחריות לפי קטגוריה'], ['sites','אתרי ספקים לחיפוש'], ['icecat','תמונות מוצרים']]],
   ['ספקים', [['suppliers','מחירוני ספקים'], ['extension','תוסף כרום']]],
-  ['חיבורים', [['sumit','סאמיט'], ['mail','מייל וזיהוי קבלות']]],
+  ['חיבורים', [['sumit','סאמיט'], ['mail','מייל וזיהוי קבלות'], ['phone','קבלות מהטלפון (שתף)'], ['whatsapp','וואטסאפ למספר המערכת']]],
   ['משתמשים', [['users','משתמשים והרשאות'], ['me','החשבון שלי']]],
   ['מערכת', [['backup','גיבוי ושחזור'], ['about','גרסה ומידע']]]];
 function setTree(){
@@ -1925,6 +1927,8 @@ function setSection(){
     case 'extension': return card('תוסף כרום למחירונים ולמוצרים', '<div id="extBox"></div>');
     case 'sumit': return card('סאמיט', '<div id="suBox"></div>');
     case 'mail': return card('מייל וזיהוי קבלות', '<div id="finSet"></div>');
+    case 'whatsapp': return card('וואטסאפ: קבלות להוצאות', '<div id="waSet"><p class="muted">טוען...</p></div>');
+    case 'phone': return card('קליטת קבלות מהטלפון (וואטסאפ)', '<div id="phoneBox"></div>');
     case 'users': return card('משתמשים והרשאות', '<div id="usersBox"><p class="muted">טוען...</p></div>');
     case 'me': return card('החשבון שלי', '<p>'+esc((window.__me || {}).name || '')+' <span class="psub" style="direction:ltr">'+esc((window.__me || {}).email || '')+'</span> · '+esc((window.__me || {}).roleLabel || '')+'</p><h4>שינוי סיסמה</h4><div class="frm"><label>סיסמה נוכחית<input type="password" id="mePw0"></label><label>סיסמה חדשה (8 תווים לפחות)<input type="password" id="mePw1"></label></div><div class="btns"><button class="primary" id="mePwGo">שנה סיסמה</button></div>');
     case 'backup': return card('גיבוי ושחזור', '<p class="muted" style="margin-bottom:8px">גיבוי של המחירון וההגדרות כקובץ. הנתונים עצמם (לקוחות, מסמכים, פרויקטים) מגובים בשרת כל לילה.</p><div class="btns"><button id="kExport">העתק מחירון והגדרות לגיבוי</button><label class="chk"><span class="btnlike">טען מגיבוי</span> <input type="file" id="kImport" accept=".json,application/json,text/plain"></label></div>');
@@ -1978,6 +1982,8 @@ function renderCatalog(pg){
     if (setSel === 'extension') renderExtBox();
     if (setSel === 'sumit') renderSumitBox();
     if (setSel === 'mail') renderFinSettings();
+    if (setSel === 'whatsapp') renderWaSettings();
+    if (setSel === 'phone') renderPhoneSetup();
     if (setSel === 'users') renderUsers();
     if ($('#setTpl')) $('#setTpl').addEventListener('click', () => openTemplates(() => renderCatalog(pg)));
     if ($('#kApply')) $('#kApply').addEventListener('click', () => { state.pricing.profitEq = +cat.defaults.profitEq||0; state.pricing.profitLab = +cat.defaults.profitLab||0; save(); pgMsg('אחוזי הרווח עודכנו בפרויקט "'+esc(state.name)+'".'); });
@@ -1987,6 +1993,22 @@ function renderCatalog(pg){
     if ($('#mePwGo')) $('#mePwGo').addEventListener('click', async () => { try { await window.__users.changeMyPassword($('#mePw0').value, $('#mePw1').value); $('#mePw0').value = $('#mePw1').value = ''; pgMsg('הסיסמה שונתה.'); } catch(e){ pgMsg(esc(e.message || 'נכשל'), true); } });
     processInbox().catch(() => {});
   }
+}
+async function renderWaSettings(){
+  const el = $('#waSet'); if (!el) return;
+  if (!window.__fin || !window.__fin.waStatus){ el.innerHTML = '<p class="muted">זמין בגרסה שמותקנת על השרת שלך.</p>'; return; }
+  let w; try { w = await window.__fin.waStatus(); } catch(e){ el.innerHTML = '<div class="warnbox">'+esc(e.message || 'נכשל')+'</div>'; return; }
+  if (!el.isConnected) return;
+  const hook = location.origin + '/api/wa/webhook';
+  el.innerHTML = '<p class="muted" style="margin-bottom:8px">שולחים צילום או PDF של קבלה למספר הוואטסאפ של המערכת, והיא נרשמת בהוצאות תוך כמה שניות, עם תשובה בוואטסאפ. זה עובד דרך WhatsApp Cloud API של Meta, עם מספר ייעודי. הודעות נכנסות ותשובות תוך 24 שעות לא מחויבות בתשלום.</p>'+
+    '<div class="okbox" style="margin-bottom:10px;font-size:13.5px"><b>הגדרה ב־Meta, פעם אחת:</b><ol style="margin:6px 18px 0;padding:0;line-height:1.7"><li>developers.facebook.com ← Create App ← סוג Business ← הוסף את WhatsApp.</li><li>ב־API Setup: הוסף את המספר הייעודי ואמת אותו. העתק את <b>Phone number ID</b>.</li><li>ב־Business Settings ← System users: צור משתמש מערכת עם הרשאת whatsapp_business_messaging, והפק <b>טוקן קבוע</b>.</li><li>ב־App settings ← Basic: העתק את <b>App secret</b>.</li><li>ב־WhatsApp ← Configuration ← Webhook: כתובת <code style="direction:ltr;unicode-bidi:isolate">'+esc(hook)+'</code>, Verify token <code style="direction:ltr;unicode-bidi:isolate">'+esc(w.verifyToken)+'</code>, ואז Subscribe ל־<b>messages</b>.</li></ol></div>'+
+    '<div class="frm"><label>Phone number ID<input type="text" id="waPid" value="'+esc(w.phoneNumberId || '')+'" style="direction:ltr"></label><label>טוקן קבוע<input type="password" id="waTok" placeholder="'+(w.configured ? '•••••• (שמור)' : '')+'" style="direction:ltr"></label>'+
+    '<label>App secret (לאימות שההודעות באמת מ־Meta)<input type="password" id="waSec" placeholder="'+(w.hasSecret ? '•••••• (שמור)' : '')+'" style="direction:ltr"></label><label>מספרים מורשים לשלוח קבלות<input type="text" id="waAllow" value="'+esc((w.allowed || []).join(', '))+'" placeholder="למשל 0501234567" style="direction:ltr"></label></div>'+
+    '<p class="muted" style="font-size:12.5px">רק הודעות מהמספרים המורשים נרשמות כהוצאות. אפשר כמה מספרים, מופרדים בפסיק.</p>'+
+    '<div class="btns"><button class="primary" id="waSave">שמור</button><button id="waTest">שלח הודעת בדיקה</button></div><div id="waMsg">'+(w.lastIn ? '<p class="muted">קבלה אחרונה: '+tsDate(w.lastIn)+' '+new Date(w.lastIn).toTimeString().slice(0,5)+' · '+esc(w.lastResult || '')+'</p>' : '')+'</div>';
+  const say = (t, bad) => { el.querySelector('#waMsg').innerHTML = '<p style="color:'+(bad ? 'var(--danger)' : 'var(--muted)')+'">'+t+'</p>'; };
+  el.querySelector('#waSave').addEventListener('click', async () => { try { await window.__fin.waSave({phoneNumberId:el.querySelector('#waPid').value.trim(), token:el.querySelector('#waTok').value.trim() || undefined, appSecret:el.querySelector('#waSec').value.trim() || undefined, allowed:el.querySelector('#waAllow').value}); say('נשמר.'); renderWaSettings(); } catch(e){ say(esc(e.message || 'נכשל'), true); } });
+  el.querySelector('#waTest').addEventListener('click', async () => { say('שולח...'); try { const r = await window.__fin.waTest(); say('נשלחה הודעת בדיקה ל־' + esc(r.to) + '. עכשיו שלח מהטלפון צילום של קבלה למספר של המערכת.'); } catch(e){ say(esc(e.message || 'נכשל'), true); } });
 }
 async function renderUsers(){
   const el = $('#usersBox'); if (!el) return;
@@ -2050,6 +2072,7 @@ async function mergeProject(id){
 let dlNS = null;
 const dlP = (window.claude && typeof window.claude.use === 'function') ? window.claude.use('downloads').then(n => (dlNS = n)).catch(() => null) : Promise.resolve(null);
 async function saveFile(name, data){
+  if (pdfSink){ const k = pdfSink; pdfSink = null; return k(name, data instanceof Blob ? data : new Blob([data], {type:'application/pdf'})); }
   if (window.TCP_SELF){
     const blob = data instanceof Blob ? data : new Blob([data], {type:/\.csv$/.test(name) ? 'text/csv;charset=utf-8' : /\.json$/.test(name) ? 'application/json' : 'application/octet-stream'});
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
@@ -2568,7 +2591,7 @@ function renderCustomer(pg, c){
   if (docs.length){
     a += '<div class="tblw" style="margin-top:10px"><table class="tbl"><thead><tr><th>תאריך</th><th>מסמך</th><th>מספר</th><th>סכום</th><th>פרויקט</th><th></th></tr></thead><tbody>';
     docs.forEach(d => { a += '<tr><td>'+tsDate(d.created)+'</td><td>'+(DOCK[d.kind] || d.kind)+(d.draft ? ' <span class="psub">(טיוטה)</span>' : '')+(d.emailed ? ' <span class="psub">· נשלח</span>' : '')+'</td><td>'+esc(String(d.number || '—'))+'</td>'+
-      '<td class="n">'+money(d.total)+'</td><td>'+esc(d.projectName || '')+'</td><td>'+(d.url ? '<a href="'+esc(d.url)+'" target="_blank" rel="noopener">PDF</a>' : '')+'</td></tr>'; });
+      '<td class="n">'+money(d.total)+'</td><td>'+esc(d.projectName || '')+'</td><td style="white-space:nowrap">'+(d.url ? '<a href="'+esc(d.url)+'" target="_blank" rel="noopener">PDF</a>'+(c.phone ? ' · <a href="'+esc(waUrl(c.phone, 'שלום ' + (c.contact || c.name || '') + ',\nמצורפת ' + (DOCK[d.kind] || 'המסמך') + (d.number ? ' מספר ' + d.number : '') + ' מ' + (cat.company.name || '') + ':\n' + d.url))+'" target="_blank" rel="noopener">וואטסאפ</a>' : '') : '')+'</td></tr>'; });
     a += '</tbody></table></div>';
   } else a += '<p class="muted" style="margin-top:8px">עדיין לא הופקו מסמכים ללקוח הזה.</p>';
   h += card('מסמכים', a);
@@ -2971,6 +2994,9 @@ function renderBilling(pg){
   h += card('הגדרות גבייה', '<div class="frm">'+fld('ימי אשראי ברירת מחדל לחשבונית','billing.termsDays','number')+'</div><p class="muted" style="margin-top:6px">משמש לחישוב מועד התשלום של חשבוניות שאין להן תאריך יעד.</p>') + '</div>';
   pg.innerHTML = h;
   bindAll(pg, () => cat, () => { saveCat(); renderBlList(); });
+  { const bt0 = $('.pghead .btns') || (() => { const d = document.createElement('div'); d.className = 'btns'; d.style.margin = '0'; $('.pghead').appendChild(d); return d; })();
+    bt0.insertAdjacentHTML('afterbegin', '<button id="blWaAll">תזכורות בוואטסאפ לכל הפיגורים</button>');
+    $('#blWaAll').addEventListener('click', () => { const late = Object.values(documents).filter(d => docOpen(d) && daysLate(d) > 0).sort((a, b) => daysLate(b) - daysLate(a)); if (!late.length){ pgMsg('אין חובות באיחור.'); return; } openWhatsAppReminders(late, renderBlList); }); }
   finStatus().then(() => { if (viewMode !== 'billing' || !mailReady() || $('#blMailAll')) return; const bt = $('.pghead .btns') || (() => { const d = document.createElement('div'); d.className = 'btns'; d.style.margin = '0'; $('.pghead').appendChild(d); return d; })();
     bt.insertAdjacentHTML('afterbegin', '<button id="blMailAll">שלח תזכורות במייל לכל הפיגורים</button><button id="blTpl">תבניות מייל</button>');
     $('#blMailAll').addEventListener('click', () => { const late = Object.values(documents).filter(d => docOpen(d) && daysLate(d) > 0).sort((a, b) => daysLate(b) - daysLate(a)); if (!late.length){ pgMsg('אין חובות באיחור.'); return; } openMailSend(late, renderBlList); });
@@ -3075,7 +3101,7 @@ function renderTicket(pg, t){
   const billed = t.billedDocId && documents[t.billedDocId];
   let h = '<div class="pg"><div class="pghead"><div><a href="#" id="tkBack">→ כל הקריאות</a><h2 style="margin:4px 0 0">קריאה #'+t.number+(t.title ? ': '+esc(t.title) : '')+'</h2>'+
     '<p class="muted">נפתחה '+tsDate(t.created)+(c ? ' · <a href="#" id="tkCust">'+esc(c.name)+'</a>' : '')+(billed ? ' · חויבה ב'+DOCK[billed.kind]+(billed.number ? ' '+esc(String(billed.number)) : '') : '')+'</p></div>'+
-    '<div class="btns" style="margin:0"><button id="tkSign">'+(t.signature ? 'חתימה מחדש' : 'חתימת לקוח')+'</button><button id="tkPdf">דוח שירות (PDF)</button>'+
+    '<div class="btns" style="margin:0"><button id="tkSign">'+(t.signature ? 'חתימה מחדש' : 'חתימת לקוח')+'</button><button id="tkPdf">דוח שירות (PDF)</button><button id="tkWa">שלח בוואטסאפ</button>'+
     (sumitReady() && !t.warranty ? '<button id="tkBill"'+(billed ? '' : ' class="primary"')+'>'+(billed ? 'חיוב נוסף' : 'הפק חשבון')+'</button>' : '')+
     '<button class="danger" id="tkDel">'+(tkDelArm ? 'לחץ שוב למחיקה' : 'מחק')+'</button></div></div><div id="pgMsg"></div>';
   h += card('פרטי הקריאה', '<div class="frm">'+fld('נושא','title')+
@@ -3125,6 +3151,8 @@ function renderTicket(pg, t){
   });
   $('#tkSign').addEventListener('click', () => openSignature(t, () => renderTicket(pg, t)));
   $('#tkPdf').addEventListener('click', runJob($('#tkPdf'), () => makeServiceReport(t)));
+  $('#tkWa').addEventListener('click', () => { const c = customers[t.customerId] || {}; sendPdfWhatsApp({gen:() => makeServiceReport(t), phone:customerPhone(t.customerId, t.phone), customerId:t.customerId, kind:'service',
+    text:'שלום ' + (c.contact || c.name || '') + ',\nמצורף דוח השירות לקריאה #' + t.number + (t.title ? ' (' + t.title + ')' : '') + '.', after:() => { tkLog(t, 'דוח שירות נשלח בוואטסאפ'); putTicket(t).catch(() => {}); }}); });
   if ($('#tkBill')) $('#tkBill').addEventListener('click', async () => {
     if (!t.customerId || !customers[t.customerId]){ pgMsg('בחר לקוח לקריאה לפני הפקת חשבון.', true); return; }
     const L = ticketLines(t); if (!L.length){ pgMsg('אין מה לחייב: הזן שעות עבודה או חלקים.', true); return; }
@@ -3819,7 +3847,7 @@ function renderDeal(pg, d){
   const c = customers[d.customerId], t = dealTotals(d), custList = Object.values(customers).filter(x => !x._new && x.name).sort((a, b) => a.name.localeCompare(b.name, 'he'));
   let h = '<div class="pg"><div class="pghead"><div><a href="#" id="dlBack">→ כל ההזמנות</a><h2 style="margin:4px 0 0">הזמנה #'+d.number+(c ? ' · '+esc(c.name) : '')+'</h2><p class="muted">נפתחה '+tsDate(d.created)+' · '+STAGES[d.stage]+'</p></div>'+
     '<div class="btns" style="margin:0">'+(sumitReady() ? '<button class="primary" id="dlQuote">הצעת מחיר דרך סאמיט</button><button id="dlPay">דרישת תשלום</button><button id="dlInv">חשבונית מס קבלה</button>' : '')+
-    '<button id="dlPdf">הצעה מעוצבת (PDF)</button><button class="danger" id="dlDel">'+(dlDelArm ? 'לחץ שוב למחיקה' : 'מחק')+'</button></div></div><div id="pgMsg"></div>';
+    '<button id="dlPdf">הצעה מעוצבת (PDF)</button><button id="dlWa">שלח בוואטסאפ</button><button class="danger" id="dlDel">'+(dlDelArm ? 'לחץ שוב למחיקה' : 'מחק')+'</button></div></div><div id="pgMsg"></div>';
   h += '<div class="card"><div style="display:flex;flex-wrap:wrap;gap:6px">'+STAGE_FLOW.map(k => { const done = STAGE_FLOW.indexOf(k) <= STAGE_FLOW.indexOf(d.stage) && d.stage !== 'lost';
       return '<button class="sm" data-st="'+k+'" style="'+(k === d.stage ? 'background:var(--btnOn);color:var(--btnOnInk);border-color:var(--btnOn)' : done ? 'border-color:var(--sel);color:var(--sel)' : '')+'">'+STAGES[k]+((d.stageDates || {})[k] ? '<div style="font-size:10.5px;opacity:.8">'+tsDate(d.stageDates[k])+'</div>' : '')+'</button>'; }).join('')+
     '<button class="sm danger" data-st="lost"'+(d.stage === 'lost' ? ' style="background:var(--danger);color:#fff"' : '')+'>בוטל</button></div>'+
@@ -3844,6 +3872,8 @@ function renderDeal(pg, d){
   bindAll(pg, () => d, () => { tot(); clearTimeout(dlTimer); dlTimer = setTimeout(() => putDeal(d).catch(() => pgMsg('השמירה נכשלה.', true)), 600); });
   $('#dlBack').addEventListener('click', e => { e.preventDefault(); dealSel = null; dlDelArm = false; renderDeals(); });
   $('#dlPdf').addEventListener('click', () => { if (!(d.lines || []).length){ pgMsg('אין מוצרים בהזמנה.', true); return; } makeDealProposal(d); });
+  $('#dlWa').addEventListener('click', () => { if (!(d.lines || []).length){ pgMsg('אין מוצרים בהזמנה.', true); return; } const c = customers[d.customerId] || {};
+    sendPdfWhatsApp({gen:() => makeDealProposal(d), phone:c.phone, customerId:d.customerId, kind:'proposal', text:'שלום ' + (c.contact || c.name || '') + ',\nמצורפת הצעת המחיר #' + d.number + (d.title && d.title !== 'הצעת מחשוב' ? ' (' + d.title + ')' : '') + '.', after:() => { d.log = (d.log || []).concat({at:Date.now(), text:'הצעה נשלחה בוואטסאפ'}); if (d.stage === 'draft') setStage(d, 'quote'); putDeal(d).catch(() => {}); if (dealSel === d.id && viewMode === 'deals') renderDeal(pg, d); }}); });
   if (!pimgLoaded) loadPimages().then(() => { if (dealSel === d.id && viewMode === 'deals') renderDeal(pg, d); });
   $('#dlCust').addEventListener('change', async e => { d.customerId = e.target.value || null; await putDeal(d); renderDeal(pg, d); });
   pg.querySelectorAll('[data-st]').forEach(b => b.addEventListener('click', async () => { if (b.dataset.st === d.stage) return; setStage(d, b.dataset.st); await putDeal(d); renderDeal(pg, d); }));
@@ -4521,7 +4551,7 @@ function guessCategory(vendor, text){
   const prev = Object.values(expenses).filter(x => x.vendor && vendor && normName(x.vendor) === normName(vendor)).sort((a, b) => b.updated - a.updated)[0];
   if (prev && prev.category) return prev.category;
   const t = (vendor + ' ' + (text || '')).toLowerCase();
-  const R = [['רכב ודלק', /דלק|תדלוק|פז\b|סונול|דור אלון|delek|ten |yellow|מוסך|צמיגים/], ['תקשורת וטלפון', /בזק|סלקום|פרטנר|הוט|גולן|019|012|אינטרנט|cellcom|partner|bezeq/],
+  const R = [['רכב ודלק', /דלק|תדלוק|(?:^|[\s,.-])פז(?:$|[\s,.-])|סונול|דור אלון|delek|ten |yellow|מוסך|צמיגים/], ['תקשורת וטלפון', /בזק|סלקום|פרטנר|הוט|גולן|019|012|אינטרנט|cellcom|partner|bezeq/],
     ['תוכנה ומנויים', /microsoft|google|adobe|aws|amazon web|zoom|office\s*365|office365|ms office|dropbox|github|openai|anthropic|godaddy|cloudflare|kamatera|מנוי|subscription|eset|gamers/],
     ['ציוד ומחשבים', /ksp|ivory|באג|bug|מחשב|מורלוי|ביטק|גרנד|b-tech|morlevi|grand/], ['נסיעות וחניה', /חניה|פנגו|cellopark|רב.?קו|רכבת|מונית|gett|כביש 6|מנהרות/],
     ['אוכל ואירוח', /מסעד|קפה|cafe|פיצה|wolt|תן ביס|10bis|סופר|שופרסל|רמי לוי/], ['משרד ואחזקה', /משרד|ניקיון|אופיס דיפו|office depot|נייר|דיו|טונר|toner|paper/], ['שיווק ופרסום', /facebook|meta|פרסום|google ads|שיווק|דפוס/]];
@@ -4580,17 +4610,22 @@ function editExpense(x, onSaved){
     '<div class="btns"><button class="primary" id="xeS">שמור הוצאה</button>'+(x._new ? '' : '<button class="danger" id="xeD">מחק</button>')+(x._queued ? '<button id="xeSkip">דלג</button>' : '')+'</div></div></div>');
   m.querySelector('.mbox').style.maxWidth = '980px';
   const net = () => { m.querySelector('#xeNet').textContent = 'לפני מע״מ: ' + money((+x.total || 0) - (+x.vat || 0)); };
-  bindAll(m, () => x, net); net();
+  let vatTouched = +x.vat > 0 && x._rec !== 'manual';
   const setV = v => { x.vat = v; const i = m.querySelector('[data-b="vat"]'); if (i) i.value = v; net(); };
-  m.querySelector('#xeVat').addEventListener('click', () => setV(vatOf(+x.total || 0)));
-  m.querySelector('#xeNoVat').addEventListener('click', () => setV(0));
+  bindAll(m, () => x, el => { const k = el.dataset.b;
+    if (k === 'vat') vatTouched = true;
+    if (k === 'total' && !vatTouched) setV(vatOf(+x.total || 0));
+    if (k === 'vendor' && (x.category === 'אחר' || !x.category)){ const g = guessCategory(x.vendor, ''); if (g !== 'אחר'){ x.category = g; const c = m.querySelector('[data-b="category"]'); if (c) c.value = g; } }
+    net(); }); net();
+  m.querySelector('#xeVat').addEventListener('click', () => { vatTouched = true; setV(vatOf(+x.total || 0)); });
+  m.querySelector('#xeNoVat').addEventListener('click', () => { vatTouched = true; setV(0); });
   m.querySelector('#xeX').addEventListener('click', () => { closeModal2(); if (x._queued) nextExpense(); });
   if (m.querySelector('#xeSkip')) m.querySelector('#xeSkip').addEventListener('click', () => { closeModal2(); nextExpense(); });
   m.querySelector('#xeS').addEventListener('click', async e => {
     if (!(+x.total > 0)){ alert('חסר סכום'); return; }
     const dup = Object.values(expenses).find(y => y.id !== x.id && ((x.invoiceNumber && y.invoiceNumber === x.invoiceNumber && (y.vendorId === x.vendorId || normName(y.vendor) === normName(x.vendor))) || (Math.abs((+y.total || 0) - (+x.total || 0)) < 0.01 && y.date === x.date && normName(y.vendor) === normName(x.vendor))));
     if (dup && e.target.dataset.dup !== '1'){ e.target.dataset.dup = '1'; e.target.textContent = 'שמור בכל זאת'; m.querySelector('#xeNet').innerHTML = '<span style="color:var(--danger)">כבר קיימת הוצאה דומה: '+esc(dup.vendor || '')+' · '+dmy(dup.date)+' · '+money(+dup.total || 0)+(dup.invoiceNumber ? ' · חשבונית '+esc(dup.invoiceNumber) : '')+'. ייתכן שזו אותה קבלה.</span>'; return; }
-    const inId = x._inbox; ['_new', '_rec', '_queued', '_inbox'].forEach(k => delete x[k]);
+    const inId = x._inbox; ['_new', '_rec', '_queued', '_inbox', 'needsReview', 'reviewReason'].forEach(k => delete x[k]);
     await putExpense(x);
     if (inId && cloud){ try { await expInColRef().doc(inId).set({id:inId, status:'done', expenseId:x.id, at:Date.now()}); } catch(e) {} }
     closeModal2(); if (onSaved) onSaved(x); else renderPage(); nextExpense();
@@ -4611,6 +4646,17 @@ async function nextExpense(){
   try { const x = await expenseFromFile(f); editExpense(x); pgMsg(''); } catch(e){ pgMsg('הקובץ לא נקרא: ' + esc(e.message || ''), true); nextExpense(); }
 }
 async function uploadExpenseFiles(files){
+  if (window.__fin && window.__fin.auto && cloud){
+    let ok = 0, review = 0, dup = 0, bad = [];
+    for (let i = 0; i < files.length; i++){ const file = files[i];
+      if (!/pdf|image\/(jpeg|png|webp)/i.test(file.type) && !/\.(pdf|jpe?g|png|webp)$/i.test(file.name)){ bad.push(file.name + ': סוג לא נתמך'); continue; }
+      pgMsg('מזהה ורושם ' + (i + 1) + ' מתוך ' + files.length + '... (תמונה לוקחת כמה שניות)');
+      try { const r = await window.__fin.auto(file); if (r.duplicate) dup++; else { expenses[r.expense.id] = r.expense; if (r.expense.needsReview) review++; else ok++; } }
+      catch(e){ bad.push(file.name + ': ' + (e.message || 'נכשל')); } }
+    await loadFinance(); await renderExpenses();
+    pgMsg('נרשמו ' + (ok + review) + ' הוצאות' + (review ? ', ' + review + ' מהן לבדיקה' : '') + (dup ? ', ' + dup + ' כפולות דולגו' : '') + (bad.length ? '. נכשלו: ' + bad.map(esc).join(' · ') : '.'), !!bad.length);
+    return;
+  }
   for (const file of files){
     if (!/pdf|image\/(jpeg|png|webp)/i.test(file.type) && !/\.(pdf|jpe?g|png|webp)$/i.test(file.name)){ pgMsg('סוג קובץ לא נתמך: ' + esc(file.name), true); continue; }
     try {
@@ -4633,19 +4679,23 @@ async function renderExpenses(pg){
   let h = '<div class="pg"><div class="pghead"><div><h2 style="margin:0">הוצאות</h2><p class="muted">העלה קבלה או חשבונית (PDF או תמונה). המערכת מזהה ספק, תאריך, סכום ומע״מ, ושומרת את הקובץ.'+(mailReady() ? ' קבלות שמגיעות לתיבת המייל נקלטות לבד.' : '')+'</p></div>'+
     '<div class="btns" style="margin:0"><button id="xpNew">הוצאה ידנית</button><button id="xpCsv">ייצוא לרו״ח (CSV)</button>'+(mailReady() && finSt.mail.imapHost ? '<button id="xpPoll">בדוק מייל עכשיו</button>' : '')+'</div></div><div id="pgMsg"></div>'+
     '<div id="xpDrop" style="border:2px dashed var(--line);border-radius:10px;padding:16px;text-align:center;margin-bottom:12px"><b>גרור לכאן קבלות וחשבוניות</b> <span class="muted">(PDF או תמונה, אפשר כמה יחד)</span><div style="margin-top:6px"><input type="file" id="xpFile" multiple accept="application/pdf,image/jpeg,image/png,image/webp"></div>'+
-    '<p class="muted" style="margin:6px 0 0;font-size:12.5px">זיהוי: '+(finSt.ai && finSt.ai.configured ? 'בינה מלאכותית ('+esc(finSt.ai.model)+')' : 'חינמי בתוך המערכת. לזיהוי מדויק יותר מצילומים, הוסף מפתח API במחירון ← "זיהוי קבלות"')+'</p></div>';
-  if (inbox.length) h += card('קבלות שהגיעו במייל ('+inbox.length+')', '<div class="tblw"><table class="tbl"><tbody>'+inbox.map(x => '<tr><td>'+esc(x.subject || x.fileName || 'מייל')+'<div class="psub">'+esc(x.from || '')+' · '+tsDate(x.at)+'</div></td><td class="psub">'+esc(x.fileName || (x.text ? 'גוף המייל' : ''))+'</td><td><button class="sm primary" data-xin="'+x.id+'">קלוט</button> <button class="sm" data-xig="'+x.id+'">התעלם</button></td></tr>').join('')+'</tbody></table></div><div class="btns"><button class="primary" id="xpInAll">קלוט את כולן</button></div>');
+    '<p class="muted" style="margin:6px 0 0;font-size:12.5px">מהטלפון: בוואטסאפ "שתף ← Toranit". <a href="#" id="xpPhone">איך מגדירים</a> · זיהוי: '+(finSt.ai && finSt.ai.configured ? 'בינה מלאכותית ('+esc(finSt.ai.model)+')' : 'חינמי בשרת: צילומים, PDF ו־PDF סרוק. כל קבלה נרשמת אוטומטית, ומה שלא זוהה במלואו מסומן "לבדיקה". מפתח API משפר את הדיוק בצילומים קשים')+'</p></div>';
+  if (inbox.length) h += card('קבלות שהגיעו במייל ('+inbox.length+')', '<div class="tblw"><table class="tbl"><tbody>'+inbox.map(x => '<tr><td>'+esc(x.subject || x.fileName || 'מייל')+'<div class="psub">'+(x.source === 'phone' ? 'מהטלפון · ' : '')+esc(x.from || '')+' · '+tsDate(x.at)+'</div></td><td class="psub">'+esc(x.fileName || (x.text ? 'גוף המייל' : ''))+'</td><td><button class="sm primary" data-xin="'+x.id+'">קלוט</button> <button class="sm" data-xig="'+x.id+'">התעלם</button></td></tr>').join('')+'</tbody></table></div><div class="btns"><button class="primary" id="xpInAll">קלוט את כולן</button></div>');
   h += '<div class="stats"><div class="stat"><span>הוצאות בחודש</span><b>'+money0(sum(inMonth))+'</b></div><div class="stat"><span>מע״מ תשומות בחודש</span><b>'+money0(sumV(inMonth))+'</b></div><div class="stat"><span>לפני מע״מ</span><b>'+money0(sum(inMonth) - sumV(inMonth))+'</b></div><div class="stat"><span>מסמכים</span><b>'+inMonth.length+'</b></div></div>';
-  h += '<div class="card"><div class="dfilter"><select id="xpM">'+months.map(mm => '<option value="'+mm+'">'+mm.split('-').reverse().join('/')+'</option>').join('')+'<option value="all">הכול</option></select><input type="text" id="xpQ" placeholder="חיפוש: ספק, קטגוריה, מספר חשבונית" style="flex:1"></div><div id="xpList"></div></div></div>';
+  const nRev = all.filter(x => x.needsReview).length;
+  if (nRev && window.__fin && window.__fin.auto) h += '<div class="warnbox" style="margin-bottom:10px">'+nRev+' הוצאות נרשמו אוטומטית אבל לא כל הפרטים זוהו. <a href="#" id="xpRevGo">הצג אותן</a></div>';
+  h += '<div class="card"><div class="dfilter"><select id="xpM">'+months.map(mm => '<option value="'+mm+'">'+mm.split('-').reverse().join('/')+'</option>').join('')+'<option value="review">לבדיקה ('+nRev+')</option><option value="all">הכול</option></select><input type="text" id="xpQ" placeholder="חיפוש: ספק, קטגוריה, מספר חשבונית" style="flex:1"></div><div id="xpList"></div></div></div>';
   pg.innerHTML = h;
   $('#xpM').value = exMonth; $('#xpQ').value = exQ;
   $('#xpM').addEventListener('change', e => { exMonth = e.target.value; renderExpenses(pg); }); $('#xpQ').addEventListener('input', e => { exQ = e.target.value; drawExpenses(); });
   $('#xpNew').addEventListener('click', () => { const x = newExpense(); x._new = true; editExpense(x); });
+  if ($('#xpRevGo')) $('#xpRevGo').addEventListener('click', e => { e.preventDefault(); exMonth = 'review'; renderExpenses(pg); });
+  if ($('#xpPhone')) $('#xpPhone').addEventListener('click', e => { e.preventDefault(); setSel = 'phone'; setView('settings'); });
   $('#xpFile').addEventListener('change', e => { const fs = [...(e.target.files || [])]; e.target.value = ''; uploadExpenseFiles(fs); });
   const dz = $('#xpDrop'); ['dragover','dragenter'].forEach(t => dz.addEventListener(t, e => { e.preventDefault(); dz.style.borderColor = 'var(--sel)'; })); ['dragleave','drop'].forEach(t => dz.addEventListener(t, () => { dz.style.borderColor = ''; }));
   dz.addEventListener('drop', e => { e.preventDefault(); uploadExpenseFiles([...(e.dataTransfer.files || [])]); });
   $('#xpCsv').addEventListener('click', () => exportExpensesCsv(exMonth === 'all' ? all : inMonth));
-  if ($('#xpPoll')) $('#xpPoll').addEventListener('click', async e => { e.target.disabled = true; pgMsg('בודק את תיבת המייל...'); try { const r = await window.__fin.mailPoll(); await renderExpenses(pg); pgMsg(r.skipped ? 'הבדיקה כבר רצה, נסה שוב בעוד רגע.' : 'נקלטו ' + (r.mails || 0) + ' מיילים, ' + (r.files || 0) + ' קבצים.'); } catch(err){ pgMsg(esc(err.message || 'נכשל'), true); e.target.disabled = false; } });
+  if ($('#xpPoll')) $('#xpPoll').addEventListener('click', async e => { e.target.disabled = true; pgMsg('בודק את תיבת המייל...'); try { const r = await window.__fin.mailPoll(); await loadFinance(); await renderExpenses(pg); pgMsg(r.skipped ? 'הבדיקה כבר רצה, נסה שוב בעוד רגע.' : 'נקלטו ' + (r.mails || 0) + ' מיילים, נרשמו ' + (r.recorded || 0) + ' הוצאות' + (r.dups ? ', ' + r.dups + ' כפולות דולגו' : '') + '.'); } catch(err){ pgMsg(esc(err.message || 'נכשל'), true); e.target.disabled = false; } });
   const take = it => exQueue.push({blobId:it.blobId, src:it.src, mime:it.mime, fileName:it.fileName, subject:it.subject, from:it.from, text:it.text || '', source:'email', inboxId:it.id});
   pg.querySelectorAll('[data-xin]').forEach(b => b.addEventListener('click', () => { take(inbox.find(x => x.id === b.dataset.xin)); nextExpense(); }));
   pg.querySelectorAll('[data-xig]').forEach(b => b.addEventListener('click', async () => { const it = inbox.find(x => x.id === b.dataset.xig); it.status = 'ignored'; await expInColRef().doc(it.id).set(it); renderExpenses(pg); }));
@@ -4655,14 +4705,14 @@ async function renderExpenses(pg){
 function drawExpenses(){
   const el = $('#xpList'); if (!el) return;
   const q = exQ.trim().toLowerCase();
-  let list = Object.values(expenses).filter(x => exMonth === 'all' || expMonth(x) === exMonth);
+  let list = Object.values(expenses).filter(x => exMonth === 'review' ? x.needsReview : (exMonth === 'all' || expMonth(x) === exMonth));
   if (q) list = list.filter(x => [x.vendor, x.category, x.invoiceNumber, x.notes, x.vendorId].some(v => String(v || '').toLowerCase().includes(q)));
   list.sort((a, b) => String(b.date).localeCompare(String(a.date)));
   if (!list.length){ el.innerHTML = '<p class="muted">אין הוצאות בתקופה הזו.</p>'; return; }
   const byCat = {}; list.forEach(x => { byCat[x.category] = (byCat[x.category] || 0) + (+x.total || 0); });
   el.innerHTML = '<p class="muted" style="margin:0 0 6px">'+Object.keys(byCat).sort((a, b) => byCat[b] - byCat[a]).map(k => esc(k) + ': ' + money0(byCat[k])).join(' · ')+'</p>'+
     '<div class="tblw"><table class="tbl"><thead><tr><th>תאריך</th><th>ספק</th><th>קטגוריה</th><th>חשבונית</th><th>סה״כ</th><th>מע״מ</th><th>קבלה</th></tr></thead><tbody>'+
-    list.map(x => '<tr data-xp="'+x.id+'" style="cursor:pointer"><td>'+dmy(x.date)+'</td><td><b>'+esc(x.vendor || '—')+'</b>'+(x.notes ? '<div class="psub">'+esc(x.notes.slice(0, 60))+'</div>' : '')+'</td><td class="psub">'+esc(x.category)+'</td><td class="psub">'+esc(x.invoiceNumber || '')+'</td>'+
+    list.map(x => '<tr data-xp="'+x.id+'" style="cursor:pointer'+(x.needsReview ? ';background:var(--warnSoft)' : '')+'"><td>'+dmy(x.date)+'</td><td><b>'+esc(x.vendor || '—')+'</b>'+(x.needsReview ? ' <span style="color:var(--warn);font-size:12px">⚠ לבדיקה</span>' : '')+'<div class="psub">'+esc([x.needsReview ? x.reviewReason : '', x.notes ? x.notes.slice(0, 60) : '', ({whatsapp:'מוואטסאפ', email:'מהמייל'})[x.source] || '', ({ai:'זוהה בבינה מלאכותית', ocr:'זוהה מצילום', pdf:'זוהה מ־PDF'})[x.recognizedBy] || ''].filter(Boolean).join(' · '))+'</div></td><td class="psub">'+esc(x.category)+'</td><td class="psub">'+esc(x.invoiceNumber || '')+'</td>'+
       '<td class="n">'+money(+x.total || 0)+'</td><td class="n">'+money(+x.vat || 0)+'</td><td>'+(x.src ? '<a href="'+esc(x.src)+'" target="_blank" rel="noopener" data-stop>📎</a>' : '')+(x.bankTx ? ' 🏦' : '')+'</td></tr>').join('')+'</tbody></table></div>';
   el.querySelectorAll('[data-xp]').forEach(r => r.addEventListener('click', e => { if (e.target.closest('[data-stop]')) return; editExpense(expenses[r.dataset.xp]); }));
 }
@@ -4836,8 +4886,101 @@ function applyPermsToNav(){
   document.querySelectorAll('#nav .nav-sec').forEach(sec => { let n = sec.nextElementSibling, any = false; while (n && !n.classList.contains('nav-sec') && !n.classList.contains('nav-fill')){ if (n.matches('[data-view]') && n.style.display !== 'none') any = true; n = n.nextElementSibling; } if (!any) sec.style.display = 'none'; });
   const v = document.querySelector('#nav .nav-ver'); if (v && !v.dataset.me){ v.dataset.me = '1'; v.insertAdjacentHTML('beforebegin', '<div class="nav-ver" style="padding-top:6px">'+esc(window.__me.name || window.__me.email)+' · '+esc(window.__me.roleLabel || '')+'</div>'); }
 }
+/* ---------- WhatsApp: documents with a secure link, reminders (free: sent from your own WhatsApp Business app) ---------- */
+let pdfSink = null;
+const waUrl = (phone, text) => 'https://wa.me/' + (intlPhone(phone) || '') + '?text=' + encodeURIComponent(text);
+function waHolder(){
+  const w = window.open('', '_blank');
+  if (w) try { w.document.write('<!doctype html><html dir="rtl"><meta charset="utf-8"><body style="font-family:Arial,sans-serif;text-align:center;padding:40px;color:#272336"><h3>מכין את המסמך לשליחה בוואטסאפ...</h3></body></html>'); } catch(e) {}
+  return w;
+}
+async function sendPdfWhatsApp(o){
+  const w = waHolder();
+  if (!w){ pgMsg('הדפדפן חסם חלון חדש. אפשר חלונות קופצים לאתר הזה ונסה שוב.', true); return; }
+  try {
+    let got = null;
+    pdfSink = async (name, blob) => { got = {name, blob}; };
+    await o.gen();
+    pdfSink = null;
+    if (!got){ w.close(); return; }
+    let link = '';
+    if (window.__share){ const r = await window.__share(got.blob, got.name, o.customerId, o.kind); link = r.url; }
+    else { const a = document.createElement('a'); a.href = URL.createObjectURL(got.blob); a.download = got.name; a.click(); }
+    w.location.href = waUrl(o.phone, o.text + (link ? '\n' + link : ''));
+    pgMsg(link ? 'נפתח וואטסאפ עם ההודעה וקישור למסמך. נשאר רק ללחוץ "שלח". הקישור בתוקף ל־60 יום.' : 'הקובץ הורד ונפתח וואטסאפ. צרף את הקובץ להודעה.');
+    if (o.after) o.after(link);
+  } catch(e){ pdfSink = null; try { w.close(); } catch(_) {} pgMsg('ההכנה לשליחה נכשלה: ' + esc((e && e.message) || ''), true); }
+}
+function customerPhone(cid, fallback){ const c = customers[cid] || {}; return fallback || c.phone || ''; }
+function openWhatsAppReminders(list, after){
+  const T = cat.mailTemplates || []; let ti = 0;
+  const withPhone = list.filter(d => (customers[d.customerId] || {}).phone), skipped = list.length - withPhone.length;
+  const draw = () => {
+    const t = T[ti] || {body:''};
+    const m = openModal2('<div class="pghead"><h2 style="margin:0">תזכורות בוואטסאפ ('+withPhone.length+')</h2><button id="waX" aria-label="סגור">✕</button></div>'+
+      '<p class="muted" style="margin-bottom:8px">לחיצה על "שלח" פותחת את השיחה עם הלקוח ב־WhatsApp Business עם ההודעה מוכנה. אחרי השליחה חוזרים לכאן ועוברים ללקוח הבא.</p>'+
+      (skipped ? '<div class="warnbox">'+skipped+' מסמכים דולגו כי ללקוח אין טלפון.</div>' : '')+
+      '<div class="frm"><label>תבנית<select id="waT">'+T.map((x, i) => '<option value="'+i+'"'+(i === ti ? ' selected' : '')+'>'+esc(x.name)+'</option>').join('')+'</select></label></div>'+
+      '<div class="tblw" style="max-height:52vh;overflow:auto;margin-top:8px"><table class="tbl"><tbody>'+withPhone.map((d, i) => { const c = customers[d.customerId], txt = fillTpl(t.body, tplVars(d));
+        return '<tr><td><b>'+esc(c.name)+'</b><div class="psub">'+DOCK[d.kind]+' '+esc(String(d.number || ''))+' · '+money(docBalance(d))+(daysLate(d) > 0 ? ' · '+daysLate(d)+' ימי איחור' : '')+(d.lastReminder ? ' · תזכורת אחרונה '+tsDate(d.lastReminder) : '')+'</div></td>'+
+          '<td><a class="btnlike" data-wa="'+i+'" href="'+esc(waUrl(c.phone, txt))+'" target="_blank" rel="noopener">שלח</a></td></tr>'; }).join('')+'</tbody></table></div>'+
+      '<div class="btns"><button id="waTpl">ערוך תבניות</button><button id="waDone">סיום</button></div>');
+    m.querySelector('.mbox').style.maxWidth = '760px';
+    const close = () => { closeModal2(); if (after) after(); };
+    m.querySelector('#waX').addEventListener('click', close); m.querySelector('#waDone').addEventListener('click', close);
+    m.querySelector('#waT').addEventListener('change', e => { ti = +e.target.value; draw(); });
+    m.querySelector('#waTpl').addEventListener('click', () => openTemplates(draw));
+    m.querySelectorAll('[data-wa]').forEach(a => a.addEventListener('click', () => { const d = withPhone[+a.dataset.wa]; d.reminders = (d.reminders || 0) + 1; d.lastReminder = Date.now(); d.waLog = (d.waLog || []).concat({at:Date.now(), tpl:(T[ti] || {}).name || ''}).slice(-20); putDocument(d).catch(() => {});
+      a.textContent = 'נשלח ✓'; a.style.opacity = '.6'; }));
+  };
+  draw();
+}
+
+/* ---------- receipts shared from the phone (Android share target) ---------- */
+async function handleShareTarget(){
+  const q = new URLSearchParams(location.search), st = q.get('share');
+  if (!st) return;
+  history.replaceState(null, '', location.pathname + location.hash);
+  setView('expenses');
+  if (st === 'retry'){ pgMsg('השיתוף לא נקלט כי האפליקציה עוד לא הייתה מוכנה. פתח אותה פעם אחת ושתף שוב.', true); return; }
+  if (st === 'failed' || st === 'empty'){ pgMsg('לא התקבל קובץ מהשיתוף. נסה לשתף שוב את התמונה או את ה־PDF.', true); return; }
+  if (!can('finance', 2)){ pgMsg('אין לך הרשאה להוסיף הוצאות.', true); return; }
+  if (!('caches' in window)) return;
+  try {
+    const c = await caches.open('share-inbox'), keys = await c.keys(); let n = 0, shDup = 0, shRev = 0;
+    for (const k of keys){
+      const r = await c.match(k); if (!r) continue;
+      const blob = await r.blob(), name = decodeURIComponent(r.headers.get('X-Name') || 'receipt'), file = new File([blob], name, {type:blob.type});
+      try { if (window.__fin && window.__fin.auto){ const r = await window.__fin.auto(file); n++; if (r.duplicate) shDup = (shDup || 0) + 1; else if (r.expense.needsReview) shRev = (shRev || 0) + 1; await c.delete(k); continue; } if (window.__fin){ const up = await window.__fin.upload(file); exQueue.push({blobId:up.blobId, src:up.src, mime:up.mime, fileName:name, source:'phone'}); } else { const src = await uploadImage(file); exQueue.push({src, mime:blob.type, fileName:name, source:'phone'}); } n++; }
+      catch(e){ pgMsg('העלאת ' + esc(name) + ' נכשלה: ' + esc(e.message || ''), true); }
+      await c.delete(k);
+    }
+    if (n && window.__fin && window.__fin.auto){ await loadFinance(); await renderExpenses(); pgMsg(n + ' קבלות מהשיתוף נרשמו בהוצאות' + (shRev ? ', ' + shRev + ' מהן לבדיקה' : '') + (shDup ? ', ' + shDup + ' כפולות דולגו' : '') + '.'); }
+    else if (n){ pgMsg(n + ' קבלות התקבלו מהשיתוף. בדוק את הפרטים ושמור.'); nextExpense(); }
+  } catch(e){ pgMsg('קריאת הקבלות ששותפו נכשלה.', true); }
+}
+async function renderPhoneSetup(){
+  const el = $('#phoneBox'); if (!el) return;
+  try { inboxApi = inboxApi || await window.claude.use('inbox'); } catch(e) {}
+  const ep = location.origin + '/api/receipt';
+  el.innerHTML = '<p class="muted" style="margin-bottom:10px">שולחים קבלה מוואטסאפ (או מכל אפליקציה) ישר להוצאות. היא מזוהה ונרשמת בהוצאות אוטומטית, בלי אישור.</p>'+
+    '<h4>אנדרואיד: "שתף ← Toranit"</h4><ol style="margin:0 0 10px;padding-inline-start:20px;line-height:1.8">'+
+    '<li>פתח את <b style="direction:ltr;unicode-bidi:isolate">'+esc(location.origin)+'</b> ב־Chrome בטלפון והתחבר.</li><li>תפריט ⋮ ← <b>התקן אפליקציה</b> (או "הוסף למסך הבית").</li>'+
+    '<li>בוואטסאפ: לחיצה ארוכה על הקבלה ← <b>שתף</b> ← <b>Toranit</b>. מסך ההוצאות נפתח עם הקבלה.</li></ol>'+
+    '<h4>אייפון: קיצור דרך "קבלה ל־Toranit"</h4>'+(inboxApi ? '<div class="btns" style="margin-top:0"><button class="primary" id="phKey">צור מפתח לאייפון</button></div><div id="phKeyOut"></div>' : '<p class="muted">זמין בגרסה שמותקנת על השרת שלך.</p>')+
+    '<ol style="margin:8px 0 10px;padding-inline-start:20px;line-height:1.8"><li>פתח את אפליקציית <b>קיצורים</b> (Shortcuts) ← <b>+</b> קיצור חדש, ושמור בשם "קבלה ל־Toranit".</li>'+
+    '<li>בהגדרות הקיצור (ⓘ) הפעל <b>הצג בגיליון השיתוף</b>, וסוגי קלט: תמונות וקבצים.</li>'+
+    '<li>הוסף פעולה <b>המר תמונה</b> ל־JPEG (לתמונות מהמצלמה). לקבצי PDF אפשר לדלג.</li>'+
+    '<li>הוסף פעולה <b>קבל תוכן של URL</b>: כתובת <code style="direction:ltr;unicode-bidi:isolate">'+esc(ep)+'</code>, שיטה <b>POST</b>, כותרת <code style="direction:ltr;unicode-bidi:isolate">Authorization</code> עם הערך <code style="direction:ltr;unicode-bidi:isolate">Bearer &lt;המפתח&gt;</code>, וגוף הבקשה: <b>קובץ</b> ← קלט קיצור הדרך.</li>'+
+    '<li>הוסף פעולה <b>הצג התראה</b> עם התוצאה.</li><li>בוואטסאפ: לחיצה ארוכה על הקבלה ← <b>שתף</b> ← "קבלה ל־Toranit".</li></ol>'+
+    '<h4>בכל טלפון: דרך המייל</h4><p class="muted">אם הגדרת תיבת קבלות (חיבורים ← מייל), אפשר גם "שתף ← מייל" לכתובת התיבה.</p>';
+  if ($('#phKey')) $('#phKey').addEventListener('click', async () => { try { const k = await inboxApi.keys.create('אייפון · קבלות');
+    $('#phKeyOut').innerHTML = '<div class="okbox" style="margin-top:8px"><b>המפתח (מוצג פעם אחת בלבד):</b><div style="display:flex;gap:6px;margin-top:6px"><input type="text" readonly id="phKeyVal" value="Bearer '+esc(k.key)+'" style="direction:ltr;flex:1"><button id="phCopy">העתק</button></div><p class="muted" style="margin-top:6px">הדבק את כל השורה (כולל המילה Bearer) בערך של הכותרת Authorization בקיצור הדרך. אפשר לבטל את המפתח בהגדרות ← תוסף כרום.</p></div>';
+    $('#phCopy').addEventListener('click', () => { const i = $('#phKeyVal'); i.select(); try { navigator.clipboard.writeText(i.value); $('#phCopy').textContent = 'הועתק'; } catch(e) {} }); } catch(e){ pgMsg('יצירת המפתח נכשלה.', true); } });
+}
+
 /* ---------- navigation chrome & mobile tables ---------- */
-const APP_VERSION = '1.17.0';
+const APP_VERSION = '1.19.0';
 document.querySelectorAll('.appver').forEach(e => { e.textContent = APP_VERSION; });
 function labelTables(root){
   (root || document).querySelectorAll('table.tbl').forEach(tb => {
@@ -4882,6 +5025,7 @@ $('#bInstall').addEventListener('click', async () => { if (!installEvt) return; 
   applyPermsToNav();
   setView('dash');
   openAssetFromHash(); window.addEventListener('hashchange', openAssetFromHash);
+  handleShareTarget();
   $('#loading').remove();
   requestAnimationFrame(fit);
 })();
