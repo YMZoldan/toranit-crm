@@ -1743,6 +1743,7 @@ app.post('/api/update/:action', auth, csrf, (req, res, next) => {
 
 app.get(['/', '/index.html'], (req, res) => { noCache(res); res.sendFile(path.join(PUBLIC_DIR, 'index.html')); });
 app.get('/sw.js', (req, res) => { noCache(res); res.setHeader('Service-Worker-Allowed', '/'); res.sendFile(path.join(PUBLIC_DIR, 'sw.js')); });
+app.get('/shim.js', (req, res) => { noCache(res); res.type('application/javascript'); res.sendFile(path.join(PUBLIC_DIR, 'shim.js')); });
 app.use(express.static(PUBLIC_DIR, { index: false, maxAge: '1h' }));
 app.use('/api', (req, res) => res.status(404).json({ code: 'invalid_argument', message: 'not found' }));
 
