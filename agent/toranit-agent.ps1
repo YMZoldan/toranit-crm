@@ -9,7 +9,7 @@
   Uninstall:
     & "$env:ProgramData\ToranitAgent\toranit-agent.ps1" -Uninstall
 #>
-param([switch]$Run, [switch]$Uninstall)
+param([switch]$Run, [switch]$Uninstall, [switch]$User)
 
 $Server = '@@SERVER@@'
 $Key    = '@@KEY@@'
@@ -36,9 +36,16 @@ function Install-Agent {
   $set  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   Register-ScheduledTask -TaskName $Task -Action $act -Trigger $t1,$t2 -Principal $prin -Settings $set -Force | Out-Null
   Start-ScheduledTask -TaskName $Task
-  Write-Host "Toranit Agent installed and started (scheduled task '$Task')." -ForegroundColor Green
+  # second task: runs in the logged-on user's session for screen view + input control (not SYSTEM)
+  $uact = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -User' -f $file)
+  $uprin = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
+  $uset = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+  Register-ScheduledTask -TaskName ($Task + 'User') -Action $uact -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Principal $uprin -Settings $uset -Force | Out-Null
+  try { Start-ScheduledTask -TaskName ($Task + 'User') } catch {}
+  Write-Host "Toranit Agent installed and started (tasks '$Task' and '${Task}User')." -ForegroundColor Green
 }
 function Uninstall-Agent {
+  Unregister-ScheduledTask -TaskName ($Task + 'User') -Confirm:$false -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $Task -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue
   Write-Host "Toranit Agent removed." -ForegroundColor Yellow
@@ -94,7 +101,66 @@ function Run-Shell($cmd,$shell,$timeout){
   return @{ output=$out; status=$st; exit=$ex }
 }
 
+# ---- user-session helper: screen view + input control (runs as the logged-on user, not SYSTEM) ----
+function Wait-Token { while($true){ $s=Load-State; if($s -and $s.token){ return $s.token }; Start-Sleep -Seconds 5 } }
+function Get-Screen {
+  $vs=[System.Windows.Forms.SystemInformation]::VirtualScreen; $script:VS=$vs
+  $bmp=New-Object System.Drawing.Bitmap $vs.Width,$vs.Height
+  $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($vs.X,$vs.Y,0,0,$vs.Size); $g.Dispose()
+  $maxw=1366.0; $scale=[Math]::Min(1.0,$maxw/$vs.Width)
+  if($scale -lt 1){ $w=[int]($vs.Width*$scale); $h=[int]($vs.Height*$scale); $sb=New-Object System.Drawing.Bitmap $w,$h; $sg=[System.Drawing.Graphics]::FromImage($sb); $sg.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBilinear; $sg.DrawImage($bmp,0,0,$w,$h); $sg.Dispose(); $bmp.Dispose(); $bmp=$sb }
+  $ms=New-Object System.IO.MemoryStream
+  $enc=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
+  $ep=New-Object System.Drawing.Imaging.EncoderParameters 1
+  $ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality),([int64]45)
+  $bmp.Save($ms,$enc,$ep); $bmp.Dispose()
+  return $ms.ToArray()
+}
+function Send-Frame($token,$bytes){ Invoke-WebRequest -Uri ($Server+'/api/agent/screen') -Method Post -Headers @{Authorization="Bearer $token"} -Body $bytes -ContentType 'application/octet-stream' -TimeoutSec 20 -UseBasicParsing | Out-Null }
+function Escape-Keys($s){ $o=''; foreach($c in $s.ToCharArray()){ if('+^%~(){}[]'.IndexOf($c) -ge 0){ $o+='{'+$c+'}' } else { $o+=$c } }; return $o }
+function Map-Key($k){ switch($k){ 'Enter'{'{ENTER}'} 'Backspace'{'{BS}'} 'Tab'{'{TAB}'} 'Escape'{'{ESC}'} 'Delete'{'{DEL}'} 'ArrowUp'{'{UP}'} 'ArrowDown'{'{DOWN}'} 'ArrowLeft'{'{LEFT}'} 'ArrowRight'{'{RIGHT}'} 'Home'{'{HOME}'} 'End'{'{END}'} 'PageUp'{'{PGUP}'} 'PageDown'{'{PGDN}'} default{''} } }
+function Inject($ev){
+  $vs=$script:VS; if(-not $vs){ $vs=[System.Windows.Forms.SystemInformation]::VirtualScreen; $script:VS=$vs }
+  $ax=0; $ay=0
+  if($ev.x -ne $null){ $ax=[int]($vs.X + [double]$ev.x*$vs.Width); $ay=[int]($vs.Y + [double]$ev.y*$vs.Height) }
+  switch($ev.t){
+    'move'  { [RI]::SetCursorPos($ax,$ay) | Out-Null }
+    'click' { [RI]::SetCursorPos($ax,$ay)|Out-Null; if($ev.btn -eq 'right'){ [RI]::mouse_event(0x08,0,0,0,[UIntPtr]::Zero); [RI]::mouse_event(0x10,0,0,0,[UIntPtr]::Zero) } else { [RI]::mouse_event(0x02,0,0,0,[UIntPtr]::Zero); [RI]::mouse_event(0x04,0,0,0,[UIntPtr]::Zero) } }
+    'dbl'   { [RI]::SetCursorPos($ax,$ay)|Out-Null; foreach($i in 1..2){ [RI]::mouse_event(0x02,0,0,0,[UIntPtr]::Zero); [RI]::mouse_event(0x04,0,0,0,[UIntPtr]::Zero) } }
+    'down'  { [RI]::SetCursorPos($ax,$ay)|Out-Null; if($ev.btn -eq 'right'){ [RI]::mouse_event(0x08,0,0,0,[UIntPtr]::Zero) } else { [RI]::mouse_event(0x02,0,0,0,[UIntPtr]::Zero) } }
+    'up'    { if($ev.btn -eq 'right'){ [RI]::mouse_event(0x10,0,0,0,[UIntPtr]::Zero) } else { [RI]::mouse_event(0x04,0,0,0,[UIntPtr]::Zero) } }
+    'scroll'{ [RI]::mouse_event(0x0800,0,0,([int]$ev.d*120),[UIntPtr]::Zero) }
+    'text'  { [System.Windows.Forms.SendKeys]::SendWait((Escape-Keys ([string]$ev.text))) }
+    'key'   { $k=Map-Key ([string]$ev.key); if($k){ [System.Windows.Forms.SendKeys]::SendWait($k) } }
+  }
+}
+function Run-UserHelper {
+  Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+  Add-Type @"
+using System;using System.Runtime.InteropServices;
+public class RI {
+ [DllImport("user32.dll")] public static extern bool SetCursorPos(int X,int Y);
+ [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags,uint dx,uint dy,int dwData,UIntPtr dwExtraInfo);
+}
+"@
+  $token=Wait-Token
+  while($true){
+    try{
+      $r=Call '/api/agent/remote' @{} $token
+      if($r.active){
+        if($r.inputs){ foreach($ev in $r.inputs){ try{ Inject $ev }catch{} } }
+        $b=Get-Screen; if($b -and $b.Length){ Send-Frame $token $b }
+        Start-Sleep -Milliseconds 120
+      } else { Start-Sleep -Milliseconds 300 }
+    }catch{
+      if($_.Exception.Response.StatusCode.value__ -eq 401){ $token=Wait-Token }
+      Start-Sleep -Seconds 2
+    }
+  }
+}
+
 if($Uninstall){ Uninstall-Agent; return }
+if($User){ Run-UserHelper; return }
 if(-not $Run){ Install-Agent; return }
 
 # ---- run loop ----

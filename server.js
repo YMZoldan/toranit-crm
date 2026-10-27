@@ -1736,6 +1736,73 @@ async function checkAlerts() {
 }
 setTimeout(checkAlerts, 60e3).unref(); setInterval(checkAlerts, 5 * 60e3).unref();
 
+/* ---- RMM remote screen view + control ----
+   The SYSTEM agent runs commands. A separate user-session helper captures the screen and injects
+   mouse/keyboard. Frames and input live in memory only (transient). Control requires devices:2. */
+const screens = new Map();      // deviceId -> { buf, at }
+const remoteSess = new Map();   // deviceId -> { until, inputs: [] }
+const REMOTE_TTL = 30000;       // a session stays active this long after the last admin activity
+const FRAME_TTL = 60000;        // drop stale frames
+setInterval(() => { const now = Date.now();
+  for (const [k, v] of screens) if (now - v.at > FRAME_TTL) screens.delete(k);
+  for (const [k, v] of remoteSess) if (now > v.until) remoteSess.delete(k);
+}, 30000).unref();
+const sessActive = id => { const s = remoteSess.get(id); return !!(s && Date.now() < s.until); };
+
+/* helper uploads a screen frame (JPEG) */
+app.post('/api/agent/screen', agentAuth, express.raw({ type: () => true, limit: '4mb' }), (req, res) => {
+  if (Buffer.isBuffer(req.body) && req.body.length > 100) screens.set(req.device.id, { buf: req.body, at: Date.now() });
+  res.json({ active: sessActive(req.device.id) });
+});
+/* helper long-polls for control state + pending input events */
+app.post('/api/agent/remote', agentAuth, express.json({ limit: '8kb' }), async (req, res) => {
+  const id = req.device.id;
+  let aborted = false; res.on('close', () => { aborted = true; });
+  const take = () => { const s = remoteSess.get(id); if (s && Date.now() < s.until) { const ev = s.inputs; s.inputs = []; return { active: true, inputs: ev }; } return { active: false, inputs: [] }; };
+  let r = take();
+  const deadline = Date.now() + 25000;
+  while (!r.active && !r.inputs.length && Date.now() < deadline && !aborted) { await new Promise(x => setTimeout(x, 400)); r = take(); }
+  if (aborted || res.writableEnded) return;
+  res.json(Object.assign(r, { interval: r.active ? 120 : 1 }));
+});
+
+/* admin: view the latest frame (control permission) */
+app.get('/api/devices/:id/screen', auth, (req, res) => {
+  if (!can(req, 'devices', 2)) return denied(res);
+  if (!devId(req.params.id)) return bad(res, 'bad id');
+  const f = screens.get(req.params.id);
+  if (!f) return res.status(404).json({ code: 'not_found', message: 'no frame' });
+  const s = remoteSess.get(req.params.id); if (s) s.until = Date.now() + REMOTE_TTL; // viewing keeps the session alive
+  res.setHeader('Content-Type', 'image/jpeg'); res.setHeader('Cache-Control', 'no-store'); res.send(f.buf);
+});
+/* admin: start/stop a session and push input events */
+const INPUT_TYPES = { move: 1, click: 1, down: 1, up: 1, dbl: 1, scroll: 1, key: 1, text: 1 };
+app.post('/api/devices/:id/remote', auth, csrf, express.json({ limit: '32kb' }), async (req, res, next) => {
+  try {
+    if (!can(req, 'devices', 2)) return denied(res);
+    if (!devId(req.params.id)) return bad(res, 'bad id');
+    const id = req.params.id, b = req.body || {}, action = b.action;
+    if (action === 'stop') { remoteSess.delete(id); return res.json({ ok: true, active: false }); }
+    let s = remoteSess.get(id); if (!s) { s = { until: 0, inputs: [] }; remoteSess.set(id, s); }
+    s.until = Date.now() + REMOTE_TTL;
+    if (Array.isArray(b.events)) {
+      for (const e of b.events.slice(0, 100)) {
+        if (!e || !INPUT_TYPES[e.t]) continue;
+        const ev = { t: e.t };
+        if (e.x != null) ev.x = Math.max(0, Math.min(1, +e.x)); if (e.y != null) ev.y = Math.max(0, Math.min(1, +e.y));
+        if (e.btn) ev.btn = e.btn === 'right' ? 'right' : 'left';
+        if (e.d != null) ev.d = Math.max(-10, Math.min(10, Math.round(+e.d)));
+        if (e.key != null) ev.key = String(e.key).slice(0, 40);
+        if (e.text != null) ev.text = String(e.text).slice(0, 500);
+        s.inputs.push(ev);
+      }
+      if (s.inputs.length > 400) s.inputs = s.inputs.slice(-400);
+    }
+    const f = screens.get(id);
+    res.json({ ok: true, active: true, hasFrame: !!f, frameAge: f ? Date.now() - f.at : null });
+  } catch (e) { next(e); }
+});
+
 /* in-app update: the app drops a request file, the host (systemd path unit, see install.sh) runs cameras-update */
 const CONTROL_DIR = process.env.CONTROL_DIR || '/data/control';
 const ctlFile = f => path.join(CONTROL_DIR, f);
