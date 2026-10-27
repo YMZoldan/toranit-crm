@@ -159,6 +159,8 @@ else
   sed -i "s/^DOMAIN=.*/DOMAIN=${DOMAIN}/" "$APP_DIR/.env"
 fi
 chmod 600 "$APP_DIR/.env"
+# shared with the app container (user node, uid 1000) for the in-app update button
+mkdir -p "$APP_DIR/control"; chown 1000:1000 "$APP_DIR/control"; chmod 755 "$APP_DIR/control"
 cd "$APP_DIR"
 docker compose up -d --build
 
@@ -202,6 +204,79 @@ SH
 chmod 755 /usr/local/bin/cameras-update
 cp "$SRC_DIR/setup-git-server.sh" "$APP_DIR/" 2>/dev/null || true
 ok "Update command installed: cameras-update"
+
+# ---------- in-app update button ----------
+# The app writes "check" or "update" to $APP_DIR/control/request; a systemd path unit runs cameras-control.
+# Written to a temp file and moved, so an update that reinstalls this script does not change it under the running copy.
+cat > /usr/local/bin/cameras-control.new <<'SH'
+#!/usr/bin/env bash
+# Runs on the host. "check": compare GitHub with the installed version. "update": run cameras-update.
+set -uo pipefail
+main() {
+  local C=/opt/cameras/control SRC=/opt/cameras-src
+  local req="${1:-$(cat "$C/request" 2>/dev/null || true)}"; rm -f "$C/request"
+  req=$(printf '%s' "$req" | tr -cd 'a-z')
+  local installed latest branch
+  installed=$(cat /opt/cameras/VERSION 2>/dev/null || echo "?")
+  latest=$(cat "$C/latest" 2>/dev/null || echo "")
+  status() { printf '{"state":"%s","installed":"%s","latest":"%s","at":%s000,"message":"%s"}\n' "$1" "$installed" "$latest" "$(date +%s)" "${2:-}" > "$C/status.json.tmp" && mv "$C/status.json.tmp" "$C/status.json"; chmod 644 "$C/status.json"; }
+  case "$req" in
+    check|update) ;;
+    *) return 0 ;;
+  esac
+  if [ ! -d "$SRC/.git" ]; then status failed "GitHub is not connected on the server"; return 1; fi
+  status checking
+  branch=$(git -C "$SRC" remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p'); [ -n "$branch" ] || branch=main
+  if git -C "$SRC" fetch --quiet origin "$branch" 2>/dev/null; then
+    latest=$(git -C "$SRC" show "origin/$branch:VERSION" 2>/dev/null | tr -d '[:space:]'); printf '%s' "$latest" > "$C/latest"
+  else status failed "Could not reach GitHub"; return 1; fi
+  if [ "$req" = check ]; then status idle; return 0; fi
+  status updating
+  if /usr/local/bin/cameras-update > "$C/update.log" 2>&1; then
+    installed=$(cat /opt/cameras/VERSION 2>/dev/null || echo "?"); status done
+  else
+    installed=$(cat /opt/cameras/VERSION 2>/dev/null || echo "?"); status failed "The update failed, see the log"
+  fi
+  chmod 644 "$C/update.log"
+}
+main "$@"; exit
+SH
+chmod 755 /usr/local/bin/cameras-control.new && mv -f /usr/local/bin/cameras-control.new /usr/local/bin/cameras-control
+cat > /etc/systemd/system/cameras-control.path <<'UNIT'
+[Unit]
+Description=Toranit: watch for update requests from the app
+[Path]
+PathExists=/opt/cameras/control/request
+[Install]
+WantedBy=multi-user.target
+UNIT
+cat > /etc/systemd/system/cameras-control.service <<'UNIT'
+[Unit]
+Description=Toranit: handle an update request from the app
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cameras-control
+UNIT
+cat > /etc/systemd/system/cameras-check.service <<'UNIT'
+[Unit]
+Description=Toranit: check GitHub for a new version
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cameras-control check
+UNIT
+cat > /etc/systemd/system/cameras-check.timer <<'UNIT'
+[Unit]
+Description=Toranit: check GitHub for a new version every 6 hours
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now cameras-control.path cameras-check.timer >/dev/null 2>&1
+touch "$APP_DIR/control/enabled"
+ok "Update button enabled (Settings → System → Version update)"
 
 # ---------- backups ----------
 say "Nightly backups"

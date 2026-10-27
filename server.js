@@ -1428,6 +1428,23 @@ app.get('/api/sumit/syncstatus', auth, async (req, res, next) => {
 
 /* ---------- static app ---------- */
 const noCache = res => res.setHeader('Cache-Control', 'no-cache');
+/* in-app update: the app drops a request file, the host (systemd path unit, see install.sh) runs cameras-update */
+const CONTROL_DIR = process.env.CONTROL_DIR || '/data/control';
+const ctlFile = f => path.join(CONTROL_DIR, f);
+const ctlRead = f => { try { return fs.readFileSync(ctlFile(f), 'utf8'); } catch (e) { return ''; } };
+app.get('/api/update/status', auth, (req, res) => {
+  if (!can(req, 'users', 2)) return denied(res);
+  let st = {}; try { st = JSON.parse(ctlRead('status.json') || '{}'); } catch (e) {}
+  res.json(Object.assign({ state: 'idle' }, st, { enabled: fs.existsSync(ctlFile('enabled')), pending: fs.existsSync(ctlFile('request')), log: ctlRead('update.log').slice(-8000) }));
+});
+app.post('/api/update/:action', auth, csrf, (req, res, next) => {
+  if (!can(req, 'users', 2)) return denied(res);
+  const action = { check: 'check', run: 'update' }[req.params.action];
+  if (!action) return bad(res, 'פעולה לא מוכרת');
+  if (!fs.existsSync(ctlFile('enabled'))) return bad(res, 'העדכון מהאפליקציה עוד לא הופעל בשרת. הרץ פעם אחת בשרת: cameras-update');
+  try { fs.writeFileSync(ctlFile('request'), action + '\n'); res.json({ ok: true }); } catch (e) { next(e); }
+});
+
 app.get(['/', '/index.html'], (req, res) => { noCache(res); res.sendFile(path.join(PUBLIC_DIR, 'index.html')); });
 app.get('/sw.js', (req, res) => { noCache(res); res.setHeader('Service-Worker-Allowed', '/'); res.sendFile(path.join(PUBLIC_DIR, 'sw.js')); });
 app.use(express.static(PUBLIC_DIR, { index: false, maxAge: '1h' }));

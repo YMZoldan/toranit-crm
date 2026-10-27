@@ -10,6 +10,7 @@ services:
       DATABASE_URL: postgres://cameras:${POSTGRES_PASSWORD}@db:5432/cameras
     volumes:
       - uploads:/data/uploads
+      - ./control:/data/control
     depends_on:
       db:
         condition: service_healthy

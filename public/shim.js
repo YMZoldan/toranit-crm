@@ -174,6 +174,7 @@
     list: () => api('GET', '/api/users'), create: u => api('POST', '/api/users', u), update: (id, u) => api('PUT', '/api/users/' + encodeURIComponent(id), u),
     changeMyPassword: (current, password) => api('POST', '/api/me/password', { current, password })
   };
+  window.__update = { status: () => api('GET', '/api/update/status'), check: () => api('POST', '/api/update/check'), run: () => api('POST', '/api/update/run') };
   window.__fin = {
     mailStatus: () => api('GET', '/api/mail/status'), mailSave: m => api('PUT', '/api/mail/settings', m), mailTest: () => api('POST', '/api/mail/test'),
     mailSend: m => api('POST', '/api/mail/send', m), mailPoll: () => api('POST', '/api/mail/poll'),

@@ -1878,9 +1878,9 @@ const SET_TREE = [
   ['ספקים', [['suppliers','מחירוני ספקים'], ['extension','תוסף כרום']]],
   ['חיבורים', [['sumit','סאמיט'], ['mail','מייל וזיהוי קבלות'], ['phone','קבלות מהטלפון (שתף)'], ['whatsapp','וואטסאפ למספר המערכת']]],
   ['משתמשים', [['users','משתמשים והרשאות'], ['me','החשבון שלי']]],
-  ['מערכת', [['backup','גיבוי ושחזור'], ['about','גרסה ומידע']]]];
+  ['מערכת', [['update','עדכון גרסה'], ['backup','גיבוי ושחזור'], ['about','גרסה ומידע']]]];
 function setTree(){
-  return SET_TREE.map(([g, items]) => '<div class="nav-sec" style="color:var(--muted);padding:10px 8px 4px">'+g+'</div>'+items.filter(([k]) => (k !== 'users' || can('users', 1)) && (k !== 'me' || window.__me) && (k !== 'extension' || cloud))
+  return SET_TREE.map(([g, items]) => '<div class="nav-sec" style="color:var(--muted);padding:10px 8px 4px">'+g+'</div>'+items.filter(([k]) => (k !== 'users' || can('users', 1)) && (k !== 'update' || (window.__update && can('users', 2))) && (k !== 'me' || window.__me) && (k !== 'extension' || cloud))
     .map(([k, l]) => '<button data-tree="'+k+'"'+(setSel === k ? ' aria-pressed="true"' : '')+'>'+l+'</button>').join('')).join('');
 }
 function plSection(){
@@ -1930,9 +1930,10 @@ function setSection(){
     case 'whatsapp': return card('וואטסאפ: קבלות להוצאות', '<div id="waSet"><p class="muted">טוען...</p></div>');
     case 'phone': return card('קליטת קבלות מהטלפון (וואטסאפ)', '<div id="phoneBox"></div>');
     case 'users': return card('משתמשים והרשאות', '<div id="usersBox"><p class="muted">טוען...</p></div>');
+    case 'update': return card('עדכון גרסה', '<div id="updBox"><p class="muted">טוען...</p></div>');
     case 'me': return card('החשבון שלי', '<p>'+esc((window.__me || {}).name || '')+' <span class="psub" style="direction:ltr">'+esc((window.__me || {}).email || '')+'</span> · '+esc((window.__me || {}).roleLabel || '')+'</p><h4>שינוי סיסמה</h4><div class="frm"><label>סיסמה נוכחית<input type="password" id="mePw0"></label><label>סיסמה חדשה (8 תווים לפחות)<input type="password" id="mePw1"></label></div><div class="btns"><button class="primary" id="mePwGo">שנה סיסמה</button></div>');
     case 'backup': return card('גיבוי ושחזור', '<p class="muted" style="margin-bottom:8px">גיבוי של המחירון וההגדרות כקובץ. הנתונים עצמם (לקוחות, מסמכים, פרויקטים) מגובים בשרת כל לילה.</p><div class="btns"><button id="kExport">העתק מחירון והגדרות לגיבוי</button><label class="chk"><span class="btnlike">טען מגיבוי</span> <input type="file" id="kImport" accept=".json,application/json,text/plain"></label></div>');
-    case 'about': return card('גרסה ומידע', '<p>Toranit CRM · גרסה <b>'+APP_VERSION+'</b></p><p class="muted">עדכון: במחשב publish-update.ps1 עם הקובץ החדש, ובשרת cameras-update.</p>');
+    case 'about': return card('גרסה ומידע', '<p>Toranit CRM · גרסה <b>'+APP_VERSION+'</b></p><p class="muted">לעדכון: הגדרות ← מערכת ← עדכון גרסה.</p>');
   }
   setSel = 'company'; return setSection();
 }
@@ -1985,6 +1986,7 @@ function renderCatalog(pg){
     if (setSel === 'whatsapp') renderWaSettings();
     if (setSel === 'phone') renderPhoneSetup();
     if (setSel === 'users') renderUsers();
+    if (setSel === 'update') renderUpdate();
     if ($('#setTpl')) $('#setTpl').addEventListener('click', () => openTemplates(() => renderCatalog(pg)));
     if ($('#kApply')) $('#kApply').addEventListener('click', () => { state.pricing.profitEq = +cat.defaults.profitEq||0; state.pricing.profitLab = +cat.defaults.profitLab||0; save(); pgMsg('אחוזי הרווח עודכנו בפרויקט "'+esc(state.name)+'".'); });
     if ($('#kExport')) $('#kExport').addEventListener('click', () => showText(JSON.stringify(cat), 'המחירון וההגדרות הועתקו. שמור אותם בקובץ טקסט כגיבוי.', '#pgMsg'));
@@ -2009,6 +2011,32 @@ async function renderWaSettings(){
   const say = (t, bad) => { el.querySelector('#waMsg').innerHTML = '<p style="color:'+(bad ? 'var(--danger)' : 'var(--muted)')+'">'+t+'</p>'; };
   el.querySelector('#waSave').addEventListener('click', async () => { try { await window.__fin.waSave({phoneNumberId:el.querySelector('#waPid').value.trim(), token:el.querySelector('#waTok').value.trim() || undefined, appSecret:el.querySelector('#waSec').value.trim() || undefined, allowed:el.querySelector('#waAllow').value}); say('נשמר.'); renderWaSettings(); } catch(e){ say(esc(e.message || 'נכשל'), true); } });
   el.querySelector('#waTest').addEventListener('click', async () => { say('שולח...'); try { const r = await window.__fin.waTest(); say('נשלחה הודעת בדיקה ל־' + esc(r.to) + '. עכשיו שלח מהטלפון צילום של קבלה למספר של המערכת.'); } catch(e){ say(esc(e.message || 'נכשל'), true); } });
+}
+let updTimer = 0, updFrom = '';
+async function renderUpdate(){
+  clearTimeout(updTimer);
+  const el = $('#updBox'); if (!el) return;
+  let s; try { s = await window.__update.status(); } catch(e){
+    if (updFrom){ el.innerHTML = '<div class="okbox">השרת מתעדכן ומופעל מחדש. זה לוקח כמה דקות, המסך יתרענן לבד.</div>'; updTimer = setTimeout(renderUpdate, 4000); return; }
+    el.innerHTML = '<div class="warnbox">'+esc(e.message || 'נכשל')+'</div>'; return; }
+  if (!el.isConnected) return;
+  if (!s.enabled){ el.innerHTML = '<div class="warnbox">העדכון מהאפליקציה עוד לא הופעל בשרת. הרץ פעם אחת בשרת: <span class="num">cameras-update</span></div>'; return; }
+  const inst = s.installed || APP_VERSION, latest = s.latest || '', busy = s.pending || s.state === 'checking' || s.state === 'updating';
+  if (updFrom && !busy && s.state === 'done' && inst !== updFrom){ el.innerHTML = '<div class="okbox">עודכן לגרסה <b class="num">'+esc(inst)+'</b>. טוען מחדש...</div>'; setTimeout(() => location.reload(), 1500); return; }
+  if (!busy) updFrom = '';
+  const newer = latest && latest !== inst;
+  const msg = s.pending ? 'הבקשה נשלחה לשרת...' : s.state === 'checking' ? 'בודק ב־GitHub...' : s.state === 'updating' ? 'מעדכן. זה לוקח כמה דקות, והמערכת תהיה לא זמינה לרגע בסוף.' :
+    s.state === 'failed' ? '<span style="color:var(--danger)">'+esc(s.message || 'נכשל')+'</span>' : !latest ? 'עוד לא נבדק אם יש גרסה חדשה.' : newer ? '<b>יש גרסה חדשה: <span class="num">'+esc(latest)+'</span></b>' : 'המערכת מעודכנת.';
+  el.innerHTML = '<div class="stats" style="margin-bottom:10px"><div class="stat"><span>גרסה מותקנת</span><b>'+esc(inst)+'</b></div><div class="stat"><span>גרסה אחרונה ב־GitHub</span><b>'+esc(latest || '?')+'</b></div></div>'+
+    '<p>'+msg+(s.at && !busy ? ' <span class="psub">(נבדק '+tsDate(s.at)+' '+new Date(s.at).toTimeString().slice(0,5)+')</span>' : '')+'</p>'+
+    '<div class="btns"><button class="primary" id="updRun"'+(busy || !newer ? ' disabled' : '')+'>עדכן עכשיו</button><button id="updCheck"'+(busy ? ' disabled' : '')+'>בדוק אם יש עדכון</button></div>'+
+    '<p class="muted" style="margin-top:8px">לפני כל עדכון נעשה גיבוי אוטומטי. הנתונים, המשתמשים וההגדרות נשמרים. השרת בודק לבד כל 6 שעות.</p>'+
+    (s.log ? '<details style="margin-top:8px"><summary class="muted">יומן העדכון האחרון</summary><pre style="direction:ltr;text-align:left;white-space:pre-wrap;font-size:12px;max-height:260px;overflow:auto;background:var(--bg);padding:8px;border-radius:6px">'+esc(s.log)+'</pre></details>' : '');
+  el.querySelector('#updCheck').addEventListener('click', async () => { try { await window.__update.check(); } catch(e){ pgMsg(esc(e.message || 'נכשל'), true); } renderUpdate(); });
+  el.querySelector('#updRun').addEventListener('click', async e => {
+    if (e.target.dataset.arm !== '1'){ e.target.dataset.arm = '1'; e.target.textContent = 'לחץ שוב לאישור העדכון'; return; }
+    try { await window.__update.run(); updFrom = inst; } catch(err){ pgMsg(esc(err.message || 'נכשל'), true); } renderUpdate(); });
+  if (busy || updFrom) updTimer = setTimeout(renderUpdate, 3000);
 }
 async function renderUsers(){
   const el = $('#usersBox'); if (!el) return;
@@ -4980,7 +5008,7 @@ async function renderPhoneSetup(){
 }
 
 /* ---------- navigation chrome & mobile tables ---------- */
-const APP_VERSION = '1.19.0';
+const APP_VERSION = '1.20.0';
 document.querySelectorAll('.appver').forEach(e => { e.textContent = APP_VERSION; });
 function labelTables(root){
   (root || document).querySelectorAll('table.tbl').forEach(tb => {
