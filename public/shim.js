@@ -183,6 +183,9 @@
     cmd: (id, b) => api('POST', '/api/devices/' + encodeURIComponent(id) + '/cmd', b),
     cmds: id => api('GET', '/api/devices/' + encodeURIComponent(id) + '/cmds'),
     keys: { list: () => api('GET', '/api/enrollkeys'), create: b => api('POST', '/api/enrollkeys', b), revoke: id => api('DELETE', '/api/enrollkeys/' + encodeURIComponent(id)) },
+    bulk: b => api('POST', '/api/devices/cmd-bulk', b),
+    scripts: { list: () => api('GET', '/api/scripts'), save: b => api('POST', '/api/scripts', b), remove: id => api('DELETE', '/api/scripts/' + encodeURIComponent(id)) },
+    alerts: { get: () => api('GET', '/api/rmm/alerts'), save: b => api('PUT', '/api/rmm/alerts', b) },
     installUrl: key => location.origin + '/api/agent/install.ps1?key=' + encodeURIComponent(key)
   };
   window.__fin = {

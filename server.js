@@ -246,8 +246,9 @@ app.get('/api/me', auth, (req, res) => res.json({ id: req.user.id, email: req.us
 /* per-route permissions (checked inside auth, before any body is read) */
 const ROUTE_RULES = [
   ['*', /^\/api\/users/, ['users'], 1],
-  ['GET', /^\/api\/(devices|enrollkeys)/, ['devices'], 1], ['DELETE', /^\/api\/(devices|enrollkeys)/, ['devices'], 2],
-  ['POST', /^\/api\/(devices|enrollkeys)/, ['devices'], 2], ['PUT', /^\/api\/devices/, ['devices'], 2],
+  ['GET', /^\/api\/(devices|enrollkeys|scripts)/, ['devices'], 1], ['DELETE', /^\/api\/(devices|enrollkeys|scripts)/, ['devices'], 2],
+  ['POST', /^\/api\/(devices|enrollkeys|scripts)/, ['devices'], 2], ['PUT', /^\/api\/devices/, ['devices'], 2],
+  ['GET', /^\/api\/rmm\//, ['devices'], 1], ['PUT', /^\/api\/rmm\//, ['devices'], 2], ['POST', /^\/api\/rmm\//, ['devices'], 2],
   ['PUT', /^\/api\/sumit\/credentials/, ['settings'], 2], ['POST', /^\/api\/sumit\/test/, ['settings'], 2],
   ['POST', /^\/api\/sumit\/customer/, ['customers', 'billing', 'sales', 'service', 'projects'], 2],
   ['POST', /^\/api\/sumit\/document/, ['billing', 'sales', 'service', 'projects'], 2],
@@ -1619,6 +1620,109 @@ app.get('/api/agent/install.ps1', async (req, res, next) => {
     res.send('﻿' + AGENT_PS1.replace('@@SERVER@@', base).replace('@@KEY@@', m[1]));
   } catch (e) { next(e); }
 });
+
+/* ---- RMM part 2: scripts library, bulk run, smart alerts ---- */
+const SCRIPT_COL = 'data/users/team/scripts';
+app.get('/api/scripts', auth, async (req, res, next) => {
+  try { const r = await pool.query('SELECT data FROM docs WHERE collection = $1', [SCRIPT_COL]);
+    res.json({ scripts: r.rows.map(x => x.data).sort((a, b) => String(a.name).localeCompare(String(b.name), 'he')) }); } catch (e) { next(e); }
+});
+app.post('/api/scripts', auth, csrf, express.json({ limit: '32kb' }), async (req, res, next) => {
+  try {
+    const b = req.body || {}, id = /^[a-f0-9]{10}$/.test(String(b.id || '')) ? b.id : HEX(5);
+    const shell = ['powershell', 'cmd'].includes(b.shell) ? b.shell : 'powershell';
+    const cmd = str(b.cmd, 8000), name = str(b.name, 80);
+    if (!name || !cmd) return bad(res, 'חסר שם או תוכן לסקריפט');
+    const rec = { id, name, shell, cmd, note: str(b.note, 200), updated: Date.now(), by: req.user.id };
+    await writeDoc(SCRIPT_COL + '/' + id, rec, req.user.id); res.json({ ok: true, id });
+  } catch (e) { next(e); }
+});
+app.delete('/api/scripts/:id', auth, csrf, async (req, res, next) => {
+  try { if (!/^[a-f0-9]{10}$/.test(req.params.id)) return bad(res, 'bad id'); await pool.query('DELETE FROM docs WHERE path = $1', [SCRIPT_COL + '/' + req.params.id]); res.json({ ok: true }); } catch (e) { next(e); }
+});
+
+/* run a command on many devices at once */
+app.post('/api/devices/cmd-bulk', auth, csrf, express.json({ limit: '32kb' }), async (req, res, next) => {
+  try {
+    const b = req.body || {}, ids = Array.isArray(b.ids) ? b.ids.filter(devId).slice(0, 500) : [];
+    if (!ids.length) return bad(res, 'לא נבחרו מחשבים');
+    const shell = CMD_SHELLS[b.shell] ? b.shell : 'powershell';
+    const cmd = ['software', 'updates', 'sysinfo'].includes(shell) ? shell : str(b.cmd, 8000);
+    if (!cmd) return bad(res, 'הפקודה ריקה');
+    const timeout = Math.min(900, Math.max(5, +b.timeout || 120));
+    let n = 0;
+    for (const id of ids) {
+      const d = (await pool.query('SELECT 1 FROM docs WHERE path = $1', [DEV_COL + '/' + id])).rows[0]; if (!d) continue;
+      const cid = HEX(10);
+      await writeDoc(devCmdCol(id) + '/' + cid, { id: cid, deviceId: id, cmd, shell, status: 'queued', by: req.user.id, byName: req.user.name || req.user.email, at: Date.now(), timeout, bulk: true }, req.user.id);
+      n++;
+    }
+    res.json({ ok: true, queued: n });
+  } catch (e) { next(e); }
+});
+
+/* smart alerts: thresholds evaluated on the server, with email/WhatsApp notification */
+const ALERT_DEFAULTS = { enabled: false, offlineMin: 15, diskPct: 10, updatesMin: 0, email: '', wa: '', channels: { email: true, wa: false } };
+async function mailRaw(to, subject, text) {
+  const m = await getSecret('mail'); if (!m || !m.pass) throw new Error('mail not configured');
+  await smtpOf(m).sendMail({ from: (m.fromName ? '"' + m.fromName.replace(/"/g, '') + '" ' : '') + '<' + (m.fromEmail || m.user) + '>', to, subject, text, replyTo: m.fromEmail || m.user });
+}
+app.get('/api/rmm/alerts', auth, async (req, res, next) => {
+  try { const a = (await getSecret('rmmalerts')) || {}; const { state, ...pub } = a; res.json(Object.assign({}, ALERT_DEFAULTS, pub)); } catch (e) { next(e); }
+});
+app.put('/api/rmm/alerts', auth, csrf, express.json({ limit: '8kb' }), async (req, res, next) => {
+  try {
+    const b = req.body || {}, cur = (await getSecret('rmmalerts')) || {};
+    const a = Object.assign({}, ALERT_DEFAULTS, cur, {
+      enabled: !!b.enabled,
+      offlineMin: Math.min(1440, Math.max(2, +b.offlineMin || 15)),
+      diskPct: Math.min(50, Math.max(0, +b.diskPct || 0)),
+      updatesMin: Math.min(999, Math.max(0, +b.updatesMin || 0)),
+      email: str(b.email, 200), wa: waDigits(b.wa),
+      channels: { email: !!(b.channels && b.channels.email), wa: !!(b.channels && b.channels.wa) }
+    });
+    a.state = cur.state || {};
+    await setSecret('rmmalerts', a); const { state, ...pub } = a; res.json(pub);
+  } catch (e) { next(e); }
+});
+async function notifyAlert(a, title, body) {
+  const full = 'Toranit RMM: ' + title + '\n' + body;
+  if (a.channels.email && a.email) { try { await mailRaw(a.email, 'Toranit RMM: ' + title, body); } catch (e) { console.log('alert mail failed:', e.message); } }
+  if (a.channels.wa && a.wa) { try { const w = await getSecret('wa'); if (w && w.token && w.phoneNumberId) await waSend(w, a.wa, { type: 'text', text: { body: full.slice(0, 1000) } }); } catch (e) { console.log('alert wa failed:', e.message); } }
+}
+let alertRunning = false;
+async function checkAlerts() {
+  if (alertRunning) return; alertRunning = true;
+  try {
+    const a = await getSecret('rmmalerts'); if (!a || !a.enabled) return;
+    a.state = a.state || {}; const now = Date.now(); let changed = false;
+    const rows = (await pool.query('SELECT data FROM docs WHERE collection = $1', [DEV_COL])).rows.map(x => x.data);
+    const live = new Set();
+    for (const d of rows) {
+      live.add(d.id); const st = a.state[d.id] || (a.state[d.id] = {});
+      const name = d.name || d.hostname || d.id;
+      // offline
+      const offline = now - (d.lastSeen || 0) > a.offlineMin * 60e3;
+      if (offline && !st.offline) { st.offline = true; changed = true; await notifyAlert(a, 'מחשב מנותק', name + ' לא דיווח יותר מ-' + a.offlineMin + ' דקות.'); }
+      else if (!offline && st.offline) { st.offline = false; changed = true; }
+      // disk low (check all disks)
+      if (a.diskPct > 0 && d.metrics) {
+        const disks = d.metrics.disks || (d.metrics.diskTotal ? [{ drive: 'C:', free: d.metrics.diskFree, total: d.metrics.diskTotal }] : []);
+        const low = disks.filter(x => x.total && (x.free / x.total) * 100 < a.diskPct);
+        if (low.length && !st.disk) { st.disk = true; changed = true; await notifyAlert(a, 'דיסק כמעט מלא', name + ': ' + low.map(x => x.drive + ' ' + Math.round(x.free / x.total * 100) + '% פנוי').join(', ')); }
+        else if (!low.length && st.disk) { st.disk = false; changed = true; }
+      }
+      // pending updates
+      if (a.updatesMin > 0 && d.updates && d.updates.count >= a.updatesMin) {
+        if (!st.updates) { st.updates = true; changed = true; await notifyAlert(a, 'עדכונים ממתינים', name + ': ' + d.updates.count + ' עדכוני Windows ממתינים.'); }
+      } else if (st.updates) { st.updates = false; changed = true; }
+    }
+    for (const id of Object.keys(a.state)) if (!live.has(id)) { delete a.state[id]; changed = true; }
+    if (changed) await setSecret('rmmalerts', a);
+  } catch (e) { console.log('checkAlerts error:', e.message); }
+  finally { alertRunning = false; }
+}
+setTimeout(checkAlerts, 60e3).unref(); setInterval(checkAlerts, 5 * 60e3).unref();
 
 /* in-app update: the app drops a request file, the host (systemd path unit, see install.sh) runs cameras-update */
 const CONTROL_DIR = process.env.CONTROL_DIR || '/data/control';

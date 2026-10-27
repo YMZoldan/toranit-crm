@@ -1636,8 +1636,18 @@ function addDays(s, n){ const d = parseIso(s) || new Date(); d.setDate(d.getDate
 const fname = s => String(s || '').replace(/[\\/:*?"<>|]+/g, ' ').trim() || 'פרויקט';
 
 /* ===================== מחשבים (RMM) ===================== */
-let devSel = null, devTimer = null;
+let devSel = null, devTimer = null, devSelSet = {}, scriptCache = [];
 function clearDevTimer(){ if (devTimer){ clearTimeout(devTimer); devTimer = null; } }
+/* predefined remote actions — these are plain commands, shown in full in the log */
+const QUICK = {
+  restart:  { label:'אתחול', shell:'cmd', cmd:'shutdown /r /t 5 /c "Toranit: restart"', confirm:'לאתחל את המחשב?' },
+  shutdown: { label:'כיבוי', shell:'cmd', cmd:'shutdown /s /t 5 /c "Toranit: shutdown"', confirm:'לכבות את המחשב?' },
+  logoff:   { label:'ניתוק משתמש', shell:'cmd', cmd:'for /f "tokens=3" %i in (\'quser ^| findstr Active\') do logoff %i', confirm:'לנתק את המשתמש המחובר?' },
+  updates:  { label:'התקן עדכוני Windows', shell:'powershell', timeout:900, confirm:'להתקין עכשיו את כל עדכוני Windows הממתינים? ייתכן אתחול.',
+    cmd:'$s=New-Object -ComObject Microsoft.Update.Session;$se=$s.CreateUpdateSearcher().Search("IsInstalled=0 and Type=\'Software\' and IsHidden=0");if($se.Updates.Count -eq 0){\'No pending updates\';return};$dl=$s.CreateUpdateDownloader();$dl.Updates=$se.Updates;[void]$dl.Download();$in=$s.CreateUpdateInstaller();$in.Updates=$se.Updates;$r=$in.Install();"Installed "+$se.Updates.Count+" updates. result="+$r.ResultCode+" rebootRequired="+$r.RebootRequired' },
+  services: { label:'שירותים', shell:'powershell', cmd:'Get-Service | Sort-Object Status,DisplayName | Format-Table -Auto Status,Name,DisplayName | Out-String -Width 300' },
+  processes:{ label:'תהליכים', shell:'powershell', cmd:'Get-Process | Sort-Object WS -Descending | Select-Object -First 40 Name,Id,@{n=\'MB\';e={[int]($_.WS/1MB)}} | Format-Table -Auto | Out-String' }
+};
 function devAgo(ms){ if (!ms) return 'אף פעם'; const s = Math.floor((Date.now()-ms)/1000); if (s < 60) return 'לפני ' + s + ' שׄ'; const m = Math.floor(s/60); if (m < 60) return 'לפני ' + m + ' דק׳'; const h = Math.floor(m/60); if (h < 24) return 'לפני ' + h + ' שע׳'; return 'לפני ' + Math.floor(h/24) + ' ימים'; }
 function devBar(used, total, unit){ const p = total ? Math.min(100, Math.round(used/total*100)) : 0; const col = p >= 90 ? 'var(--danger)' : p >= 75 ? 'var(--warn)' : 'var(--sel)'; return '<div class="prog" style="height:9px"><i style="width:'+p+'%;background:'+col+'"></i></div><span class="psub">'+numf(used)+' / '+numf(total)+' '+(unit||'')+' ('+p+'%)</span>'; }
 function custName(id){ return (id && customers[id] && customers[id].name) || ''; }
@@ -1652,18 +1662,20 @@ function renderDevices(pg){
   window.__rmm.list().then(r => {
     if (viewMode !== 'devices' || devSel) return;
     const ds = r.devices || [], on = ds.filter(d => d.online).length, upd = ds.filter(d => d.updates && d.updates.count > 0).length;
-    let h = '<div class="pg"><div class="pghead"><div><h2 style="margin:0">מחשבים</h2><p class="muted">ניטור ותחזוקה מרחוק של מחשבים שבאחריותך. הסוכן מותקן בהסכמה על כל מחשב, וכל פעולה נרשמת ביומן.</p></div><div class="btns">'+(ro?'':'<button class="primary" id="dvKeys">מפתחות התקנה</button>')+'<button id="dvRef">רענן</button></div></div><div id="pgMsg"></div>';
+    let h = '<div class="pg"><div class="pghead"><div><h2 style="margin:0">מחשבים</h2><p class="muted">ניטור ותחזוקה מרחוק של מחשבים שבאחריותך. הסוכן מותקן בהסכמה על כל מחשב, וכל פעולה נרשמת ביומן.</p></div><div class="btns">'+(ro?'':'<button id="dvAlerts">התראות</button><button id="dvScripts">ספריית סקריפטים</button><button class="primary" id="dvKeys">מפתחות התקנה</button>')+'<button id="dvRef">רענן</button></div></div><div id="pgMsg"></div>';
     h += '<div class="stats"><div class="stat"><span>מחשבים</span><b>'+ds.length+'</b></div><div class="stat"><span>מחוברים כעת</span><b style="color:var(--sel)">'+on+'</b></div><div class="stat"><span>מנותקים</span><b>'+(ds.length-on)+'</b></div><div class="stat"><span>ממתינים לעדכונים</span><b'+(upd?' style="color:var(--warn)"':'')+'>'+upd+'</b></div></div>';
     if (!ds.length){ h += card('אין עדיין מחשבים', '<p class="muted">כדי להוסיף מחשב: '+(ro?'בקש ממנהל המערכת קובץ התקנה.':'פתח "מפתחות התקנה", הורד קובץ התקנה, והפעל אותו כמנהל על המחשב שברצונך לנהל.')+'</p>'+(ro?'':'<div class="btns"><button class="primary" id="dvKeys2">מפתחות התקנה</button></div>')); }
     else {
-      h += '<div class="card"><div class="tblw"><table class="tbl"><thead><tr><th>מחשב</th><th>לקוח</th><th>מצב</th><th>מעבד</th><th>זיכרון</th><th>דיסק C</th><th>נראה לאחרונה</th><th>מערכת</th></tr></thead><tbody>';
-      ds.forEach(d => { const m = d.metrics || {}; h += '<tr data-dev="'+d.id+'" style="cursor:pointer">'+
+      h += (ro?'':'<div id="dvBulk" class="card" style="display:none;align-items:center;gap:10px;flex-wrap:wrap"><b><span id="dvBulkN">0</span> נבחרו</b><button class="sm" id="dvBulkCmd">הרץ פקודה</button><button class="sm" id="dvBulkScript">הרץ סקריפט שמור</button><button class="sm" id="dvBulkClear">נקה בחירה</button></div>');
+      h += '<div class="card"><div class="tblw"><table class="tbl"><thead><tr>'+(ro?'':'<th style="width:28px"><input type="checkbox" id="dvAll" aria-label="בחר הכל"></th>')+'<th>מחשב</th><th>לקוח</th><th>מצב</th><th>מעבד</th><th>זיכרון</th><th>דיסק</th><th>נראה לאחרונה</th><th>מערכת</th></tr></thead><tbody>';
+      ds.forEach(d => { const m = d.metrics || {}; const dk = (m.disks&&m.disks.length)?m.disks:(m.diskTotal?[{drive:'C:',free:m.diskFree,total:m.diskTotal}]:[]); h += '<tr data-dev="'+d.id+'" style="cursor:pointer">'+
+        (ro?'':'<td data-label="" style="cursor:default"><input type="checkbox" class="dvChk" data-id="'+d.id+'" aria-label="בחר"></td>')+
         '<td data-label="מחשב"><span class="pname">'+esc(d.name)+'</span>'+(d.updates&&d.updates.count>0?' <span class="psub" style="color:var(--warn)">● '+d.updates.count+' עדכונים</span>':'')+'</td>'+
         '<td data-label="לקוח">'+esc(custName(d.customerId))+'</td>'+
         '<td data-label="מצב"><span class="dot" style="background:'+(d.online?'var(--sel)':'var(--muted)')+'"></span> '+(d.online?'מחובר':'מנותק')+'</td>'+
         '<td data-label="מעבד" class="n">'+(m.cpu!=null?m.cpu+'%':'—')+'</td>'+
         '<td data-label="זיכרון" class="n">'+(m.memTotal?numf(m.memUsed)+'/'+numf(m.memTotal)+' GB':'—')+'</td>'+
-        '<td data-label="דיסק C" class="n">'+(m.diskTotal?numf(m.diskFree)+' GB פנוי':'—')+'</td>'+
+        '<td data-label="דיסק" class="n">'+(dk.length?dk.map(x=>esc(x.drive)+' '+numf(x.free)+'/'+numf(x.total)).join('<br>'):'—')+'</td>'+
         '<td data-label="נראה">'+devAgo(d.lastSeen)+'</td>'+
         '<td data-label="מערכת" class="psub">'+esc(d.os||'')+'</td></tr>'; });
       h += '</tbody></table></div></div>';
@@ -1672,8 +1684,18 @@ function renderDevices(pg){
     const keys = () => openEnrollKeys();
     if ($('#dvKeys')) $('#dvKeys').addEventListener('click', keys);
     if ($('#dvKeys2')) $('#dvKeys2').addEventListener('click', keys);
+    if ($('#dvAlerts')) $('#dvAlerts').addEventListener('click', openAlerts);
+    if ($('#dvScripts')) $('#dvScripts').addEventListener('click', () => openScripts());
     $('#dvRef').addEventListener('click', () => renderDevices(pg));
-    pg.querySelectorAll('[data-dev]').forEach(tr => tr.addEventListener('click', () => { devSel = tr.dataset.dev; renderDevice(pg, devSel); }));
+    pg.querySelectorAll('[data-dev]').forEach(tr => tr.addEventListener('click', e => { if (e.target.closest('input')) return; devSel = tr.dataset.dev; renderDevice(pg, devSel); }));
+    const selIds = () => Object.keys(devSelSet).filter(k => devSelSet[k] && ds.some(d => d.id === k));
+    const updBulk = () => { const n = selIds().length, bar = $('#dvBulk'); if (bar){ bar.style.display = n ? 'flex' : 'none'; $('#dvBulkN').textContent = n; } const all = $('#dvAll'); if (all) all.checked = n && n === ds.length; };
+    pg.querySelectorAll('.dvChk').forEach(c => { c.checked = !!devSelSet[c.dataset.id]; c.addEventListener('change', () => { devSelSet[c.dataset.id] = c.checked; updBulk(); }); });
+    if ($('#dvAll')) $('#dvAll').addEventListener('change', e => { ds.forEach(d => devSelSet[d.id] = e.target.checked); pg.querySelectorAll('.dvChk').forEach(c => c.checked = e.target.checked); updBulk(); });
+    if ($('#dvBulkClear')) $('#dvBulkClear').addEventListener('click', () => { devSelSet = {}; pg.querySelectorAll('.dvChk').forEach(c => c.checked = false); updBulk(); });
+    if ($('#dvBulkCmd')) $('#dvBulkCmd').addEventListener('click', () => bulkRun(selIds(), null));
+    if ($('#dvBulkScript')) $('#dvBulkScript').addEventListener('click', () => bulkRun(selIds(), 'script'));
+    updBulk();
     clearDevTimer(); devTimer = setTimeout(() => { if (viewMode === 'devices' && !devSel && !$('#modal2')) renderDevices(pg); }, 15000);
   }).catch(e => { pg.innerHTML = '<div class="pg"><div class="warnbox">'+esc((e&&e.message)||'טעינה נכשלה')+'</div></div>'; });
 }
@@ -1691,7 +1713,7 @@ function renderDevice(pg, id){
     h += '<div class="card"><h3>מצב</h3><div class="stats">'+
       '<div class="stat"><span>מעבד</span><b>'+(m.cpu!=null?m.cpu+'%':'—')+'</b></div>'+
       '<div class="stat"><span>זיכרון</span>'+(m.memTotal?devBar(m.memUsed,m.memTotal,'GB'):'<b>—</b>')+'</div>'+
-      '<div class="stat"><span>דיסק C</span>'+(m.diskTotal?devBar(m.diskTotal-m.diskFree,m.diskTotal,'GB'):'<b>—</b>')+'</div>'+
+      ((m.disks&&m.disks.length)?m.disks:(m.diskTotal?[{drive:'C:',free:m.diskFree,total:m.diskTotal}]:[])).map(x=>'<div class="stat"><span>דיסק '+esc(x.drive)+'</span>'+(x.total?devBar(x.total-x.free,x.total,'GB'):'<b>—</b>')+'</div>').join('')+
       '<div class="stat"><span>זמן פעולה</span><b>'+(m.uptimeMin!=null?(m.uptimeMin<60?m.uptimeMin+' דק׳':Math.floor(m.uptimeMin/60)+' שע׳'):'—')+'</b></div>'+
       '<div class="stat"><span>משתמש מחובר</span><b style="font-size:16px">'+esc(m.user||'—')+'</b></div>'+
       '<div class="stat"><span>כתובת IP</span><b style="font-size:16px;direction:ltr">'+esc(d.ip||'—')+'</b></div></div></div>';
@@ -1702,11 +1724,13 @@ function renderDevice(pg, id){
       (ro?'':'<div class="btns"><button id="dvSave">שמור</button><button class="danger" id="dvDel">הסר מחשב</button></div>')+
       '<p class="psub" style="margin-top:6px">גרסת סוכן: '+esc(d.agentVer||'?')+'</p></div>';
     if (!ro){
-      h += '<div class="card"><h3>פעולות מרחוק</h3><div class="btns" style="margin-bottom:8px"><button data-quick="software">רשימת תוכנות</button><button data-quick="updates">בדוק עדכוני Windows</button><button data-quick="sysinfo">מידע מערכת</button></div>'+
-        '<h4>הרצת פקודה</h4><p class="muted" style="margin:0 0 6px">הפקודה רצה ברקע על המחשב ונרשמת ביומן למטה. בחר PowerShell או שורת הפקודה.</p>'+
-        '<div class="dfilter" style="align-items:flex-start"><select id="dvShell" style="width:140px"><option value="powershell">PowerShell</option><option value="cmd">CMD</option></select>'+
+      h += '<div class="card"><h3>פעולות מרחוק</h3>'+
+        '<h4 style="margin-top:0">מידע</h4><div class="btns" style="margin-bottom:8px"><button data-quick="software">רשימת תוכנות</button><button data-quick="updates">בדוק עדכונים</button><button data-q="services">שירותים</button><button data-q="processes">תהליכים</button><button data-quick="sysinfo">מידע מערכת</button></div>'+
+        '<h4>שליטה</h4><div class="btns" style="margin-bottom:8px"><button data-q="updates">התקן עדכוני Windows</button><button data-svc="1">הפעל שירות מחדש</button><button class="danger" data-q="restart">אתחול</button><button class="danger" data-q="shutdown">כיבוי</button><button class="danger" data-q="logoff">ניתוק משתמש</button></div>'+
+        '<h4>הרצת פקודה או סקריפט</h4><p class="muted" style="margin:0 0 6px">הפקודה רצה ברקע ונרשמת ביומן למטה.</p>'+
+        '<div class="dfilter" style="align-items:flex-start"><select id="dvScriptSel" style="width:200px"><option value="">— סקריפט שמור —</option></select><select id="dvShell" style="width:120px"><option value="powershell">PowerShell</option><option value="cmd">CMD</option></select>'+
         '<textarea id="dvCmd" placeholder="למשל: Get-Service | Where Status -eq Running" style="flex:1;min-width:220px;height:70px;direction:ltr"></textarea></div>'+
-        '<div class="btns"><button class="primary" id="dvSend">שלח למחשב</button></div></div>';
+        '<div class="btns"><button class="primary" id="dvSend">שלח למחשב</button><button id="dvSaveScript">שמור כסקריפט</button></div></div>';
     }
     if (d.updates){ h += card('עדכוני Windows ממתינים'+(d.updates.count>0?' ('+d.updates.count+')':''), d.updates.count>0 ? '<ul class="psub" style="margin:0 18px;line-height:1.7">'+(d.updates.titles||[]).map(t => '<li>'+esc(t)+'</li>').join('')+'</ul>' : '<p class="okbox" style="margin:0">אין עדכונים ממתינים.</p>'); }
     if (d.software && d.software.length){ h += '<div class="card"><h3>תוכנות מותקנות ('+d.software.length+')</h3><input type="text" id="dvSwQ" placeholder="חיפוש תוכנה" style="width:100%;margin-bottom:8px"><div class="tblw" style="max-height:340px;overflow:auto"><table class="tbl" id="dvSwT"><thead><tr><th>תוכנה</th><th>גרסה</th><th>יצרן</th></tr></thead><tbody>'+
@@ -1723,9 +1747,14 @@ function renderDevice(pg, id){
     if (!ro){
       $('#dvSave').addEventListener('click', async () => { try { await window.__rmm.save(id, { name:$('#dvName').value, note:$('#dvNote').value, customerId:$('#dvCust').value }); pgMsg('נשמר.'); renderDevice(pg, id); } catch(e){ pgMsg(esc(e.message||'נכשל'), true); } });
       $('#dvDel').addEventListener('click', async e => { if (e.target.dataset.arm!=='1'){ e.target.dataset.arm='1'; e.target.textContent='לחץ שוב להסרה'; return; } try { await window.__rmm.remove(id); devSel=null; renderDevices(pg); } catch(err){ pgMsg(esc(err.message||'נכשל'), true); } });
-      const send = async (shell, cmd) => { try { await window.__rmm.cmd(id, { shell, cmd }); pgMsg('הפקודה נשלחה. התוצאה תופיע ביומן בעוד כמה שניות.'); setTimeout(() => { if (viewMode==='devices'&&devSel===id) renderDevice(pg, id); }, 3500); } catch(e){ pgMsg(esc(e.message||'נכשל'), true); } };
+      const send = async (shell, cmd, extra) => { try { await window.__rmm.cmd(id, Object.assign({ shell, cmd }, extra)); pgMsg('הפקודה נשלחה. התוצאה תופיע ביומן בעוד כמה שניות.'); setTimeout(() => { if (viewMode==='devices'&&devSel===id) renderDevice(pg, id); }, 3500); } catch(e){ pgMsg(esc(e.message||'נכשל'), true); } };
       pg.querySelectorAll('[data-quick]').forEach(b => b.addEventListener('click', () => send(b.dataset.quick, b.dataset.quick)));
-      $('#dvSend').addEventListener('click', () => { const c = $('#dvCmd').value.trim(); if (!c){ pgMsg('הקלד פקודה.', true); return; } send($('#dvShell').value, c); $('#dvCmd').value=''; });
+      pg.querySelectorAll('[data-q]').forEach(b => b.addEventListener('click', () => { const q = QUICK[b.dataset.q]; if (!q) return; if (q.confirm && !confirm(q.confirm)) return; send(q.shell, q.cmd, { timeout: q.timeout }); }));
+      if ($('#dvSvc')||true) pg.querySelectorAll('[data-svc]').forEach(b => b.addEventListener('click', () => { const n = prompt('שם השירות להפעלה מחדש (Service name):'); if (n && n.trim()) send('powershell', "Restart-Service -Name '"+n.trim().replace(/'/g,"''")+"' -Force; 'restarted: "+n.trim().replace(/'/g,"")+"'"); }));
+      $('#dvSend').addEventListener('click', () => { const c = $('#dvCmd').value.trim(); if (!c){ pgMsg('הקלד פקודה.', true); return; } send($('#dvShell').value, c); });
+      $('#dvSaveScript').addEventListener('click', async () => { const c = $('#dvCmd').value.trim(); if (!c){ pgMsg('אין מה לשמור — הקלד פקודה.', true); return; } const nm = prompt('שם לסקריפט:'); if (!nm||!nm.trim()) return; try { await window.__rmm.scripts.save({ name:nm.trim(), shell:$('#dvShell').value, cmd:c }); await loadScripts(); fillScriptSel($('#dvScriptSel')); pgMsg('הסקריפט נשמר.'); } catch(e){ pgMsg(esc(e.message||'נכשל'), true); } });
+      const ssel = $('#dvScriptSel'); loadScripts().then(() => { if (viewMode==='devices'&&devSel===id) fillScriptSel(ssel); });
+      ssel.addEventListener('change', () => { const s = scriptCache.find(x => x.id === ssel.value); if (s){ $('#dvCmd').value = s.cmd; $('#dvShell').value = s.shell; } });
     }
     if ($('#dvSwQ')) $('#dvSwQ').addEventListener('input', e => { const q = e.target.value.toLowerCase(); $('#dvSwT').querySelectorAll('tbody tr').forEach(tr => { tr.style.display = tr.textContent.toLowerCase().includes(q)?'':'none'; }); });
     pg.querySelectorAll('[data-out]').forEach(b => b.addEventListener('click', () => { const c = cmap[b.dataset.out]; if (c) showText(c.output||'', 'פלט הפקודה', '#pgMsg'); }));
@@ -1755,6 +1784,70 @@ function openEnrollKeys(){
 function m2Msg(t, bad){ const e = document.querySelector('#ekMsg'); if (e) e.innerHTML = '<div class="'+(bad?'warnbox':'okbox')+'">'+t+'</div>'; }
 function downloadInstaller(id){
   const a = document.createElement('a'); a.href = '/api/enrollkeys/' + encodeURIComponent(id) + '/install.cmd'; a.download = ''; document.body.appendChild(a); a.click(); a.remove();
+}
+
+async function loadScripts(){ try { scriptCache = (await window.__rmm.scripts.list()).scripts || []; } catch(e){ scriptCache = scriptCache || []; } return scriptCache; }
+function fillScriptSel(sel){ if (!sel) return; const cur = sel.value; sel.innerHTML = '<option value="">— סקריפט שמור —</option>'+scriptCache.map(s => '<option value="'+s.id+'">'+esc(s.name)+'</option>').join(''); sel.value = cur; }
+
+function bulkRun(ids, mode){
+  if (!ids.length){ pgMsg('לא נבחרו מחשבים', true); return; }
+  loadScripts().then(() => {
+    const body = '<h3 style="margin:0 0 8px">הרצה על '+ids.length+' מחשבים</h3>'+
+      '<label class="lblk">סקריפט שמור<select id="bScript"><option value="">— ללא / פקודה חופשית —</option>'+scriptCache.map(s => '<option value="'+s.id+'">'+esc(s.name)+'</option>').join('')+'</select></label>'+
+      '<div class="dfilter" style="margin-top:8px;align-items:flex-start"><select id="bShell" style="width:120px"><option value="powershell">PowerShell</option><option value="cmd">CMD</option></select>'+
+      '<textarea id="bCmd" style="flex:1;min-width:220px;height:90px;direction:ltr" placeholder="פקודה או בחר סקריפט"></textarea></div>'+
+      '<div id="bMsg"></div><div class="btns" style="margin-top:10px"><button class="primary" id="bGo">שלח ל-'+ids.length+' מחשבים</button><button id="bCancel">ביטול</button></div>';
+    const m = openModal2(body);
+    m.querySelector('#bCancel').addEventListener('click', closeModal2);
+    const bs = m.querySelector('#bScript'); if (mode === 'script' && scriptCache[0]) bs.value = scriptCache[0].id;
+    const applyScript = () => { const s = scriptCache.find(x => x.id === bs.value); if (s){ m.querySelector('#bCmd').value = s.cmd; m.querySelector('#bShell').value = s.shell; } };
+    bs.addEventListener('change', applyScript); applyScript();
+    m.querySelector('#bGo').addEventListener('click', async () => {
+      const cmd = m.querySelector('#bCmd').value.trim(); if (!cmd){ m.querySelector('#bMsg').innerHTML = '<div class="warnbox">הקלד פקודה או בחר סקריפט.</div>'; return; }
+      if (!confirm('להריץ על '+ids.length+' מחשבים?')) return;
+      try { const r = await window.__rmm.bulk({ ids, shell:m.querySelector('#bShell').value, cmd }); closeModal2(); pgMsg('נשלח ל-'+(r.queued||ids.length)+' מחשבים. התוצאות יופיעו בכרטיס כל מחשב.'); }
+      catch(e){ m.querySelector('#bMsg').innerHTML = '<div class="warnbox">'+esc(e.message||'נכשל')+'</div>'; }
+    });
+  });
+}
+
+function openScripts(){
+  const draw = async () => {
+    await loadScripts();
+    const body = '<h3 style="margin:0 0 6px">ספריית סקריפטים</h3><p class="muted" style="margin:0 0 10px">פקודות שמורות להרצה מהירה על מחשב בודד או על כמה בבת אחת.</p>'+
+      '<div class="frm"><label>שם<input type="text" id="scName"></label><label>סוג<select id="scShell"><option value="powershell">PowerShell</option><option value="cmd">CMD</option></select></label></div>'+
+      '<label class="lblk">הפקודה<textarea id="scCmd" style="height:90px;direction:ltr"></textarea></label><div class="btns" style="margin:8px 0 12px"><button class="primary" id="scAdd">הוסף סקריפט</button></div>'+
+      (scriptCache.length ? '<div class="tblw"><table class="tbl"><thead><tr><th>שם</th><th>סוג</th><th></th></tr></thead><tbody>'+scriptCache.map(s => '<tr><td>'+esc(s.name)+'</td><td class="psub">'+esc(s.shell)+'</td><td><button class="sm" data-ed="'+s.id+'">ערוך</button> <button class="sm danger" data-del="'+s.id+'">מחק</button></td></tr>').join('')+'</tbody></table></div>' : '<p class="muted">אין סקריפטים עדיין.</p>')+
+      '<div id="scMsg"></div><div class="btns" style="margin-top:12px"><button id="scClose">סגור</button></div>';
+    const m = openModal2(body);
+    m.querySelector('#scClose').addEventListener('click', closeModal2);
+    const save = async (id) => { const name = m.querySelector('#scName').value.trim(), cmd = m.querySelector('#scCmd').value.trim(); if (!name || !cmd){ m.querySelector('#scMsg').innerHTML = '<div class="warnbox">חסר שם או פקודה.</div>'; return; } try { await window.__rmm.scripts.save({ id, name, shell:m.querySelector('#scShell').value, cmd }); draw(); } catch(e){ m.querySelector('#scMsg').innerHTML = '<div class="warnbox">'+esc(e.message||'נכשל')+'</div>'; } };
+    m.querySelector('#scAdd').onclick = () => save();
+    m.querySelectorAll('[data-ed]').forEach(b => b.addEventListener('click', () => { const s = scriptCache.find(x => x.id === b.dataset.ed); if (s){ m.querySelector('#scName').value = s.name; m.querySelector('#scShell').value = s.shell; m.querySelector('#scCmd').value = s.cmd; const add = m.querySelector('#scAdd'); add.textContent = 'שמור שינויים'; add.onclick = () => save(s.id); } }));
+    m.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => { if (b.dataset.arm !== '1'){ b.dataset.arm = '1'; b.textContent = 'אישור'; return; } try { await window.__rmm.scripts.remove(b.dataset.del); draw(); } catch(e){} }));
+  };
+  draw();
+}
+
+function openAlerts(){
+  window.__rmm.alerts.get().then(a => {
+    const ch = a.channels || {};
+    const body = '<h3 style="margin:0 0 6px">התראות</h3><p class="muted" style="margin:0 0 10px">המערכת בודקת כל 5 דקות ושולחת התראה כשמתקיים תנאי. משתמשת בהגדרות המייל/וואטסאפ של המערכת.</p>'+
+      '<label class="chk" style="margin-bottom:8px"><input type="checkbox" id="alEn"'+(a.enabled?' checked':'')+'> הפעל התראות</label>'+
+      '<div class="frm"><label>מחשב מנותק יותר מ־(דקות)<input type="number" id="alOff" value="'+(a.offlineMin||15)+'" min="2"></label>'+
+      '<label>דיסק פנוי מתחת ל־(%) — 0 = כבוי<input type="number" id="alDisk" value="'+(a.diskPct||0)+'" min="0" max="50"></label>'+
+      '<label>עדכונים ממתינים מעל — 0 = כבוי<input type="number" id="alUpd" value="'+(a.updatesMin||0)+'" min="0"></label></div>'+
+      '<h4>איך לקבל התראה</h4><label class="chk"><input type="checkbox" id="alChEmail"'+(ch.email?' checked':'')+'> מייל</label><input type="text" id="alEmail" placeholder="כתובת מייל" value="'+esc(a.email||'')+'" style="width:100%;margin:4px 0 8px;direction:ltr">'+
+      '<label class="chk"><input type="checkbox" id="alChWa"'+(ch.wa?' checked':'')+'> וואטסאפ</label><input type="text" id="alWa" placeholder="מספר וואטסאפ, למשל 972501234567" value="'+esc(a.wa||'')+'" style="width:100%;direction:ltr;margin:4px 0">'+
+      '<p class="psub">מייל הוא הכי אמין. וואטסאפ יזום דורש תבנית מאושרת ב־Meta, אז ייתכן שלא יעבור בכל מקרה.</p>'+
+      '<div id="alMsg"></div><div class="btns" style="margin-top:10px"><button class="primary" id="alSave">שמור</button><button id="alClose">סגור</button></div>';
+    const m = openModal2(body);
+    m.querySelector('#alClose').addEventListener('click', closeModal2);
+    m.querySelector('#alSave').addEventListener('click', async () => {
+      try { await window.__rmm.alerts.save({ enabled:m.querySelector('#alEn').checked, offlineMin:+m.querySelector('#alOff').value, diskPct:+m.querySelector('#alDisk').value, updatesMin:+m.querySelector('#alUpd').value, email:m.querySelector('#alEmail').value, wa:m.querySelector('#alWa').value, channels:{ email:m.querySelector('#alChEmail').checked, wa:m.querySelector('#alChWa').checked } }); closeModal2(); pgMsg('הגדרות ההתראות נשמרו.'); }
+      catch(e){ m.querySelector('#alMsg').innerHTML = '<div class="warnbox">'+esc(e.message||'נכשל')+'</div>'; }
+    });
+  }).catch(e => pgMsg(esc(e.message||'נכשל'), true));
 }
 
 /* ---------- views ---------- */
@@ -5147,7 +5240,7 @@ async function renderPhoneSetup(){
 }
 
 /* ---------- navigation chrome & mobile tables ---------- */
-const APP_VERSION = '1.22.1';
+const APP_VERSION = '1.23.0';
 document.querySelectorAll('.appver').forEach(e => { e.textContent = APP_VERSION; });
 function labelTables(root){
   (root || document).querySelectorAll('table.tbl').forEach(tb => {

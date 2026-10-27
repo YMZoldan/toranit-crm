@@ -57,14 +57,16 @@ function Enroll {
 function Get-Metrics {
   $os=Get-CimInstance Win32_OperatingSystem; $cs=Get-CimInstance Win32_ComputerSystem
   $cpu=(Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
-  $d=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+  $c=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+  $disks=@(); foreach($x in (Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3")){ $disks+=@{ drive=$x.DeviceID; free=[math]::Round($x.FreeSpace/1073741824,1); total=[math]::Round($x.Size/1073741824,1) } }
   return @{
     host=$env:COMPUTERNAME; os=("{0} {1}" -f $os.Caption,$os.Version);
     cpu=[int]$cpu;
     memUsed=[math]::Round(($os.TotalVisibleMemorySize-$os.FreePhysicalMemory)/1048576,1);
     memTotal=[math]::Round($os.TotalVisibleMemorySize/1048576,1);
-    diskFree=[math]::Round($d.FreeSpace/1073741824,1);
-    diskTotal=[math]::Round($d.Size/1073741824,1);
+    diskFree=[math]::Round($c.FreeSpace/1073741824,1);
+    diskTotal=[math]::Round($c.Size/1073741824,1);
+    disks=$disks;
     uptimeMin=[int]((Get-Date)-$os.LastBootUpTime).TotalMinutes;
     user=$cs.UserName
   }
