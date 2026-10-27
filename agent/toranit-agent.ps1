@@ -9,7 +9,7 @@
   Uninstall:
     & "$env:ProgramData\ToranitAgent\toranit-agent.ps1" -Uninstall
 #>
-param([switch]$Run, [switch]$Uninstall, [switch]$User)
+param([switch]$Run, [switch]$Uninstall, [switch]$User, [switch]$Diag)
 
 $Server = '@@SERVER@@'
 $Key    = '@@KEY@@'
@@ -162,6 +162,9 @@ public class RI {
   $bh=$banner.Handle
   $ex=[RI]::GetWindowLong($bh,-20); [RI]::SetWindowLong($bh,-20,($ex -bor 0x20 -bor 0x80 -bor 0x08000000)) | Out-Null  # TRANSPARENT|TOOLWINDOW|NOACTIVATE
   $shown=$false
+  $LogDir=Join-Path $env:LOCALAPPDATA 'ToranitAgent'
+  function ULog($m){ try{ New-Item -ItemType Directory -Force $LogDir|Out-Null; Add-Content (Join-Path $LogDir 'user.log') ((Get-Date -Format s)+' '+$m) }catch{} }
+  ULog 'user-helper started'
   $token=Wait-Token
   while($true){
     try{
@@ -179,13 +182,47 @@ public class RI {
         Start-Sleep -Milliseconds 300
       }
     }catch{
+      ULog ('error: '+$_.Exception.Message)
       if($_.Exception.Response.StatusCode.value__ -eq 401){ $token=Wait-Token }
       Start-Sleep -Seconds 2
     }
   }
 }
 
+# ---- diagnostics: run in a normal (visible) PowerShell window AS THE LOGGED-IN USER ----
+function Run-Diag {
+  $ok={param($m);Write-Host ("[ OK ] "+$m) -ForegroundColor Green}
+  $bad={param($m);Write-Host ("[FAIL] "+$m) -ForegroundColor Red}
+  Write-Host "== Toranit Agent diagnostics ==" -ForegroundColor Cyan
+  Write-Host ("Server: "+$Server)
+  Write-Host ("Running as: "+[System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+  $s=Load-State
+  if($s -and $s.token){ &$ok ("Token found (device "+$s.deviceId+")") } else { &$bad ("No token in "+$State+" - the SYSTEM agent may not have enrolled yet; wait a minute after install") }
+  try{ Add-Type -AssemblyName System.Windows.Forms,System.Drawing; &$ok "Loaded Windows.Forms/Drawing" }catch{ &$bad ("Assemblies: "+$_.Exception.Message) }
+  try{ $b=Get-Screen; &$ok ("Screen capture "+$b.Length+" bytes ("+$script:VS.Width+"x"+$script:VS.Height+")") }catch{ &$bad ("Screen capture: "+$_.Exception.Message) }
+  try{
+    Add-Type @"
+using System;using System.Runtime.InteropServices;
+public class RID { [DllImport("user32.dll")] public static extern bool SetCursorPos(int X,int Y); }
+"@
+    if($script:VS){ [RID]::SetCursorPos(($script:VS.X+120),($script:VS.Y+120))|Out-Null; &$ok "Moved mouse cursor (watch it jump to top-left area)" } else { &$bad "No screen bounds for mouse test" }
+  }catch{ &$bad ("Mouse move: "+$_.Exception.Message) }
+  if($s -and $s.token){ try{ $r=Call '/api/agent/remote' @{} $s.token; &$ok ("Server reachable (session active="+[bool]$r.active+")") }catch{ &$bad ("Server call: "+$_.Exception.Message) } }
+  Write-Host "Showing the red banner for 4 seconds..." -ForegroundColor Cyan
+  try{
+    $f=New-Object System.Windows.Forms.Form; $f.FormBorderStyle=[System.Windows.Forms.FormBorderStyle]::None; $f.TopMost=$true; $f.ShowInTaskbar=$false
+    $f.StartPosition=[System.Windows.Forms.FormStartPosition]::Manual; $f.BackColor=[System.Drawing.Color]::FromArgb(200,45,35); $f.Size=New-Object System.Drawing.Size(360,32)
+    $l=New-Object System.Windows.Forms.Label; $l.Dock=[System.Windows.Forms.DockStyle]::Fill; $l.TextAlign=[System.Drawing.ContentAlignment]::MiddleCenter; $l.ForeColor=[System.Drawing.Color]::White
+    $l.Font=New-Object System.Drawing.Font('Segoe UI',10,[System.Drawing.FontStyle]::Bold); $l.Text=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('16nXnNeZ15jXlCDXnteo15fXldenINek16LXmdec15QgICAgIFRvcmFuaXQ='))
+    $f.Controls.Add($l); $wa=[System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; $f.Location=New-Object System.Drawing.Point(([int]($wa.X+($wa.Width-360)/2)),($wa.Y+6))
+    $f.Show(); for($i=0;$i -lt 40;$i++){ [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }; $f.Close()
+    &$ok "Banner displayed"
+  }catch{ &$bad ("Banner: "+$_.Exception.Message) }
+  Write-Host "== Done. Copy everything above and send it to support. ==" -ForegroundColor Cyan
+}
+
 if($Uninstall){ Uninstall-Agent; return }
+if($Diag){ Run-Diag; return }
 if($User){ Run-UserHelper; return }
 if(-not $Run){ Install-Agent; return }
 

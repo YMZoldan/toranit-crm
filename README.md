@@ -175,6 +175,14 @@ docker compose up -d --build
 - **הרשאות:** מודול "מחשבים" נפרד. ברירת מחדל: רק מנהל מערכת. הגדר לכל תפקיד/משתמש אין/צפייה/עריכה (צפייה = ניטור בלבד; עריכה = גם הרצת פקודות).
 - קובץ הסוכן לעיון: `agent/toranit-agent.ps1`. הסרה: `& "$env:ProgramData\ToranitAgent\toranit-agent.ps1" -Uninstall`.
 
+## אבחון הסוכן (RMM)
+אם צפייה/שליטה במסך לא עובדת, הרץ על המחשב המנוהל, ב-PowerShell רגיל (לא כמנהל), כמשתמש המחובר:
+```
+powershell -ExecutionPolicy Bypass -File "$env:ProgramData\ToranitAgent\toranit-agent.ps1" -Diag
+```
+זה בודק טוקן, צילום מסך, הזזת עכבר, חיבור לשרת ואת הפס האדום, ומדפיס מה עובד/נכשל. שלח את הפלט לתמיכה.
+לוג של הרכיב בסשן המשתמש: `%LOCALAPPDATA%\ToranitAgent\user.log`.
+
 ## כפתור עדכון באפליקציה
 הגדרות ← מערכת ← **עדכון גרסה** (מנהל מערכת בלבד): "בדוק אם יש עדכון" ו"עדכן עכשיו".
 האפליקציה כותבת בקשה ל־`/opt/cameras/control/request`, ושירות systemd בשרת (`cameras-control.path`) מריץ `cameras-update`.
