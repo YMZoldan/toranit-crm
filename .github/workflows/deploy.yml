@@ -1,10 +1,8 @@
-# Deploy to the server on every push to main (or manually from the Actions tab).
+# Manual deploy from the Actions tab (Run workflow). Day-to-day updates use the button in the app.
 # Needs repository secrets: SERVER_HOST, SERVER_SSH_KEY (and optionally SERVER_PORT).
-# On the server, the key is locked to run only cameras-update, see README "עדכון אוטומטי".
+# On the server, the key is locked to run only cameras-update, see README.
 name: deploy
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 concurrency: deploy
 jobs:
