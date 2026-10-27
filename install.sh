@@ -143,6 +143,7 @@ for f in server.js package.json package-lock.json Dockerfile docker-compose.yml 
   [ -f "$SRC_DIR/$f" ] && cp "$SRC_DIR/$f" "$APP_DIR/"
 done
 rm -rf "$APP_DIR/public"; cp -r "$SRC_DIR/public" "$APP_DIR/public"
+rm -rf "$APP_DIR/agent"; cp -r "$SRC_DIR/agent" "$APP_DIR/agent"
 if [ "$EXISTING" -eq 0 ]; then
   umask 077
   cat > "$APP_DIR/.env" <<ENV

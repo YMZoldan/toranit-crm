@@ -175,6 +175,16 @@
     changeMyPassword: (current, password) => api('POST', '/api/me/password', { current, password })
   };
   window.__update = { status: () => api('GET', '/api/update/status'), check: () => api('POST', '/api/update/check'), run: () => api('POST', '/api/update/run') };
+  window.__rmm = {
+    list: () => api('GET', '/api/devices'),
+    get: id => api('GET', '/api/devices/' + encodeURIComponent(id)),
+    save: (id, b) => api('PUT', '/api/devices/' + encodeURIComponent(id), b),
+    remove: id => api('DELETE', '/api/devices/' + encodeURIComponent(id)),
+    cmd: (id, b) => api('POST', '/api/devices/' + encodeURIComponent(id) + '/cmd', b),
+    cmds: id => api('GET', '/api/devices/' + encodeURIComponent(id) + '/cmds'),
+    keys: { list: () => api('GET', '/api/enrollkeys'), create: b => api('POST', '/api/enrollkeys', b), revoke: id => api('DELETE', '/api/enrollkeys/' + encodeURIComponent(id)) },
+    installUrl: key => location.origin + '/api/agent/install.ps1?key=' + encodeURIComponent(key)
+  };
   window.__fin = {
     mailStatus: () => api('GET', '/api/mail/status'), mailSave: m => api('PUT', '/api/mail/settings', m), mailTest: () => api('POST', '/api/mail/test'),
     mailSend: m => api('POST', '/api/mail/send', m), mailPoll: () => api('POST', '/api/mail/poll'),

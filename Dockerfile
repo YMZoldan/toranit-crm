@@ -4,6 +4,7 @@ ENV NODE_ENV=production PORT=3000 UPLOAD_DIR=/data/uploads
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY server.js ./
+COPY agent ./agent
 COPY public ./public
 RUN mkdir -p /data/uploads && chown -R node:node /data
 USER node

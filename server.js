@@ -147,14 +147,14 @@ app.get('/healthz', async (req, res) => {
 });
 
 /* roles and permissions: 0 = none, 1 = view, 2 = edit */
-const MODULES = { dashboard: 'דשבורד', customers: 'לקוחות', service: 'קריאות שירות', billing: 'גבייה ומסמכים', sales: 'מכירות מחשוב', finance: 'כספים (הוצאות, בנק, דוח)', projects: 'פרויקטים ומצלמות', pricelist: 'מחירון', settings: 'הגדרות', users: 'משתמשים והרשאות' };
+const MODULES = { dashboard: 'דשבורד', customers: 'לקוחות', service: 'קריאות שירות', billing: 'גבייה ומסמכים', sales: 'מכירות מחשוב', finance: 'כספים (הוצאות, בנק, דוח)', projects: 'פרויקטים ומצלמות', devices: 'מחשבים (RMM)', pricelist: 'מחירון', settings: 'הגדרות', users: 'משתמשים והרשאות' };
 const ROLES = {
-  admin:      { label: 'מנהל מערכת', perms: { dashboard: 2, customers: 2, service: 2, billing: 2, sales: 2, finance: 2, projects: 2, pricelist: 2, settings: 2, users: 2 } },
-  manager:    { label: 'מנהל', perms: { dashboard: 2, customers: 2, service: 2, billing: 2, sales: 2, finance: 2, projects: 2, pricelist: 2, settings: 2, users: 0 } },
-  office:     { label: 'מנהל משרד', perms: { dashboard: 1, customers: 2, service: 2, billing: 2, sales: 2, finance: 1, projects: 1, pricelist: 1, settings: 0, users: 0 } },
-  accountant: { label: 'הנהלת חשבונות', perms: { dashboard: 1, customers: 1, service: 0, billing: 2, sales: 1, finance: 2, projects: 0, pricelist: 1, settings: 0, users: 0 } },
-  sales:      { label: 'מכירות', perms: { dashboard: 1, customers: 2, service: 1, billing: 1, sales: 2, finance: 0, projects: 2, pricelist: 1, settings: 0, users: 0 } },
-  technician: { label: 'טכנאי', perms: { dashboard: 1, customers: 1, service: 2, billing: 0, sales: 1, finance: 0, projects: 2, pricelist: 1, settings: 0, users: 0 } },
+  admin:      { label: 'מנהל מערכת', perms: { dashboard: 2, customers: 2, service: 2, billing: 2, sales: 2, finance: 2, projects: 2, devices: 2, pricelist: 2, settings: 2, users: 2 } },
+  manager:    { label: 'מנהל', perms: { dashboard: 2, customers: 2, service: 2, billing: 2, sales: 2, finance: 2, projects: 2, devices: 0, pricelist: 2, settings: 2, users: 0 } },
+  office:     { label: 'מנהל משרד', perms: { dashboard: 1, customers: 2, service: 2, billing: 2, sales: 2, finance: 1, projects: 1, devices: 0, pricelist: 1, settings: 0, users: 0 } },
+  accountant: { label: 'הנהלת חשבונות', perms: { dashboard: 1, customers: 1, service: 0, billing: 2, sales: 1, finance: 2, projects: 0, devices: 0, pricelist: 1, settings: 0, users: 0 } },
+  sales:      { label: 'מכירות', perms: { dashboard: 1, customers: 2, service: 1, billing: 1, sales: 2, finance: 0, projects: 2, devices: 0, pricelist: 1, settings: 0, users: 0 } },
+  technician: { label: 'טכנאי', perms: { dashboard: 1, customers: 1, service: 2, billing: 0, sales: 1, finance: 0, projects: 2, devices: 0, pricelist: 1, settings: 0, users: 0 } },
   custom:     { label: 'מותאם אישית', perms: {} }
 };
 function effPerms(u) {
@@ -246,6 +246,8 @@ app.get('/api/me', auth, (req, res) => res.json({ id: req.user.id, email: req.us
 /* per-route permissions (checked inside auth, before any body is read) */
 const ROUTE_RULES = [
   ['*', /^\/api\/users/, ['users'], 1],
+  ['GET', /^\/api\/(devices|enrollkeys)/, ['devices'], 1], ['DELETE', /^\/api\/(devices|enrollkeys)/, ['devices'], 2],
+  ['POST', /^\/api\/(devices|enrollkeys)/, ['devices'], 2], ['PUT', /^\/api\/devices/, ['devices'], 2],
   ['PUT', /^\/api\/sumit\/credentials/, ['settings'], 2], ['POST', /^\/api\/sumit\/test/, ['settings'], 2],
   ['POST', /^\/api\/sumit\/customer/, ['customers', 'billing', 'sales', 'service', 'projects'], 2],
   ['POST', /^\/api\/sumit\/document/, ['billing', 'sales', 'service', 'projects'], 2],
@@ -1428,6 +1430,174 @@ app.get('/api/sumit/syncstatus', auth, async (req, res, next) => {
 
 /* ---------- static app ---------- */
 const noCache = res => res.setHeader('Cache-Control', 'no-cache');
+/* ======================= RMM: manage computers you are authorized to manage =======================
+   An openly-installed agent (a named Windows scheduled task) enrolls with a key, reports status, and
+   runs commands queued by an admin. Every command is logged on the server (who, when, what, output). */
+
+let AGENT_PS1 = '# agent template missing on server';
+try { AGENT_PS1 = fs.readFileSync(path.join(__dirname, 'agent', 'toranit-agent.ps1'), 'utf8'); } catch (e) {}
+const ENROLL_COL = 'data/users/team/enrollkeys';
+const DEV_COL = 'data/users/team/devices';
+const devCmdCol = id => 'data/users/team/devcmds/' + id;
+const HEX = n => crypto.randomBytes(n).toString('hex');
+const DEV_OFFLINE_MS = 150e3;            // no heartbeat for 2.5 min => offline
+const CMD_MAX_OUT = 60 * 1024;           // keep command output bounded
+const devOnline = d => Date.now() - (d.lastSeen || 0) < DEV_OFFLINE_MS;
+const pubDevice = d => ({ id: d.id, name: d.name || d.hostname || d.id, hostname: d.hostname || '', os: d.os || '', customerId: d.customerId || null,
+  created: d.created, lastSeen: d.lastSeen || null, online: devOnline(d), agentVer: d.agentVer || '', ip: d.ip || '', note: d.note || '',
+  metrics: d.metrics || null, software: d.software ? d.software.length : 0, updates: d.updates || null });
+
+/* enrollment keys (one per customer/site, reusable to enroll many machines) */
+app.get('/api/enrollkeys', auth, async (req, res, next) => {
+  try { const r = await pool.query('SELECT data FROM docs WHERE collection = $1', [ENROLL_COL]);
+    res.json(r.rows.map(x => ({ id: x.data.id, label: x.data.label, customerId: x.data.customerId || null, created: x.data.created, devices: x.data.devices || 0 }))); } catch (e) { next(e); }
+});
+app.post('/api/enrollkeys', auth, csrf, express.json({ limit: '4kb' }), async (req, res, next) => {
+  try {
+    const id = HEX(8), key = 'ek_' + HEX(20);
+    const data = { id, hash: sha256(key), label: str(req.body && req.body.label, 60) || 'אתר חדש', customerId: str(req.body && req.body.customerId, 40) || null, created: Date.now(), by: req.user.id, devices: 0 };
+    await writeDoc(ENROLL_COL + '/' + id, data, req.user.id);
+    res.json({ id, key, label: data.label });
+  } catch (e) { next(e); }
+});
+app.delete('/api/enrollkeys/:id', auth, csrf, async (req, res, next) => {
+  try { if (!/^[a-f0-9]{16}$/.test(req.params.id)) return bad(res, 'bad id'); await pool.query('DELETE FROM docs WHERE path = $1', [ENROLL_COL + '/' + req.params.id]); res.json({ ok: true }); } catch (e) { next(e); }
+});
+
+/* agent authentication: Bearer ag_<hex>, resolves to a device */
+const agentHits = new Map();
+function agentRate(req, res) {
+  const ip = req.ip || 'x', now = Date.now(), h = (agentHits.get(ip) || []).filter(t => now - t < 60e3); h.push(now); agentHits.set(ip, h);
+  if (h.length > 120) { res.status(429).json({ code: 'rate_limited', message: 'too many requests' }); return false; }
+  return true;
+}
+async function agentAuth(req, res, next) {
+  if (!agentRate(req, res)) return;
+  const m = /^Bearer\s+(ag_[a-f0-9]{48})$/.exec(String(req.get('Authorization') || ''));
+  if (!m) return res.status(401).json({ code: 'unauthenticated', message: 'agent token missing' });
+  try {
+    const r = await pool.query("SELECT path, data FROM docs WHERE collection = $1 AND data->>'tokenHash' = $2", [DEV_COL, sha256(m[1])]);
+    if (!r.rows[0]) return res.status(401).json({ code: 'unauthenticated', message: 'unknown agent' });
+    req.device = r.rows[0].data; next();
+  } catch (e) { next(e); }
+}
+const clientIp = req => String(req.ip || '').replace(/^::ffff:/, '').slice(0, 45);
+
+/* enroll a machine with a site key -> returns a per-device token (shown only once) */
+app.post('/api/agent/enroll', express.json({ limit: '8kb' }), async (req, res, next) => {
+  if (!agentRate(req, res)) return;
+  try {
+    const b = req.body || {}, m = /^(ek_[a-f0-9]{40})$/.exec(String(b.key || ''));
+    if (!m) return res.status(401).json({ code: 'unauthenticated', message: 'bad enroll key' });
+    const ek = (await pool.query("SELECT data FROM docs WHERE collection = $1 AND data->>'hash' = $2", [ENROLL_COL, sha256(m[1])])).rows[0];
+    if (!ek) return res.status(401).json({ code: 'unauthenticated', message: 'enroll key revoked' });
+    const machineId = str(b.machineId, 80), hostname = str(b.hostname, 80);
+    let dev = machineId ? (await pool.query("SELECT data FROM docs WHERE collection = $1 AND data->>'enrollId' = $2 AND data->>'machineId' = $3", [DEV_COL, ek.data.id, machineId])).rows[0] : null;
+    const token = 'ag_' + HEX(24);
+    if (dev) { dev = dev.data; dev.tokenHash = sha256(token); dev.hostname = hostname || dev.hostname; dev.os = str(b.os, 120) || dev.os; dev.agentVer = str(b.agentVer, 20); dev.ip = clientIp(req); dev.lastSeen = Date.now(); }
+    else {
+      dev = { id: HEX(10), enrollId: ek.data.id, customerId: ek.data.customerId || null, machineId, tokenHash: sha256(token),
+        name: hostname, hostname, os: str(b.os, 120), agentVer: str(b.agentVer, 20), ip: clientIp(req), created: Date.now(), lastSeen: Date.now(), metrics: null };
+      const d = ek.data; d.devices = (d.devices || 0) + 1; await writeDoc(ENROLL_COL + '/' + d.id, d, null);
+    }
+    await writeDoc(DEV_COL + '/' + dev.id, dev, null);
+    res.json({ deviceId: dev.id, token, interval: 30 });
+  } catch (e) { next(e); }
+});
+
+/* heartbeat: report metrics, receive any queued commands */
+app.post('/api/agent/beat', agentAuth, express.json({ limit: '256kb' }), async (req, res, next) => {
+  try {
+    const b = req.body || {}, dev = req.device;
+    dev.lastSeen = Date.now(); dev.ip = clientIp(req); if (b.agentVer) dev.agentVer = str(b.agentVer, 20);
+    if (b.metrics && typeof b.metrics === 'object') dev.metrics = Object.assign({}, b.metrics, { at: Date.now() });
+    if (Array.isArray(b.software)) dev.software = b.software.slice(0, 1000).map(x => ({ n: str(x && x.n, 120), v: str(x && x.v, 40), p: str(x && x.p, 80) })).filter(x => x.n);
+    if (b.updates && typeof b.updates === 'object') dev.updates = { count: +b.updates.count || 0, titles: Array.isArray(b.updates.titles) ? b.updates.titles.slice(0, 50).map(t => str(t, 160)) : [], at: Date.now() };
+    await writeDoc(DEV_COL + '/' + dev.id, dev, null);
+    const q = await pool.query("SELECT path, data FROM docs WHERE collection = $1 AND data->>'status' = 'queued' ORDER BY path LIMIT 20", [devCmdCol(dev.id)]);
+    const cmds = [];
+    for (const row of q.rows) { const c = row.data; c.status = 'sent'; c.sentAt = Date.now(); await writeDoc(row.path, c, null); cmds.push({ id: c.id, cmd: c.cmd, shell: c.shell || 'powershell', timeout: c.timeout || 120 }); }
+    res.json({ commands: cmds, interval: 30 });
+  } catch (e) { next(e); }
+});
+
+/* agent posts a command result */
+app.post('/api/agent/result', agentAuth, express.json({ limit: '256kb' }), async (req, res, next) => {
+  try {
+    const b = req.body || {}, dev = req.device, id = str(b.id, 40);
+    if (!/^[a-f0-9]{1,40}$/.test(id)) return bad(res, 'bad id');
+    const row = (await pool.query('SELECT path, data FROM docs WHERE path = $1', [devCmdCol(dev.id) + '/' + id])).rows[0];
+    if (!row) return res.json({ ok: true });
+    const c = row.data; c.status = b.exit === 0 || b.status === 'done' ? 'done' : 'error';
+    c.exit = Number.isFinite(+b.exit) ? +b.exit : null; c.output = String(b.output == null ? '' : b.output).slice(0, CMD_MAX_OUT); c.finished = Date.now();
+    await writeDoc(row.path, c, null);
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+/* ---- admin: devices & commands (permission module "devices", enforced by ROUTE_RULES) ---- */
+app.get('/api/devices', auth, async (req, res, next) => {
+  try { const r = await pool.query('SELECT data FROM docs WHERE collection = $1', [DEV_COL]);
+    res.json({ devices: r.rows.map(x => pubDevice(x.data)).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0)) }); } catch (e) { next(e); }
+});
+const devId = id => /^[a-f0-9]{20}$/.test(id);
+app.get('/api/devices/:id', auth, async (req, res, next) => {
+  try { if (!devId(req.params.id)) return bad(res, 'bad id');
+    const d = (await pool.query('SELECT data FROM docs WHERE path = $1', [DEV_COL + '/' + req.params.id])).rows[0];
+    if (!d) return res.status(404).json({ code: 'not_found', message: 'המחשב לא נמצא' });
+    const cmds = (await pool.query('SELECT data FROM docs WHERE collection = $1 ORDER BY path DESC LIMIT 100', [devCmdCol(req.params.id)])).rows.map(x => x.data).sort((a, b) => (b.at || 0) - (a.at || 0));
+    res.json({ device: Object.assign(pubDevice(d.data), { software: d.data.software || [] }), commands: cmds });
+  } catch (e) { next(e); }
+});
+app.put('/api/devices/:id', auth, csrf, express.json({ limit: '4kb' }), async (req, res, next) => {
+  try { if (!devId(req.params.id)) return bad(res, 'bad id');
+    const row = (await pool.query('SELECT data FROM docs WHERE path = $1', [DEV_COL + '/' + req.params.id])).rows[0];
+    if (!row) return res.status(404).json({ code: 'not_found', message: 'המחשב לא נמצא' });
+    const d = row.data, b = req.body || {};
+    if (b.name != null) d.name = str(b.name, 80); if (b.note != null) d.note = str(b.note, 300); if (b.customerId !== undefined) d.customerId = str(b.customerId, 40) || null;
+    await writeDoc(DEV_COL + '/' + d.id, d, req.user.id); res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+app.delete('/api/devices/:id', auth, csrf, async (req, res, next) => {
+  try { if (!devId(req.params.id)) return bad(res, 'bad id');
+    await pool.query('DELETE FROM docs WHERE path = $1', [DEV_COL + '/' + req.params.id]);
+    await pool.query('DELETE FROM docs WHERE collection = $1', [devCmdCol(req.params.id)]);
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+app.get('/api/devices/:id/cmds', auth, async (req, res, next) => {
+  try { if (!devId(req.params.id)) return bad(res, 'bad id');
+    const r = await pool.query('SELECT data FROM docs WHERE collection = $1 ORDER BY path DESC LIMIT 100', [devCmdCol(req.params.id)]);
+    res.json({ commands: r.rows.map(x => x.data).sort((a, b) => (b.at || 0) - (a.at || 0)) });
+  } catch (e) { next(e); }
+});
+const CMD_SHELLS = { powershell: 1, cmd: 1, software: 1, updates: 1, sysinfo: 1 };
+app.post('/api/devices/:id/cmd', auth, csrf, express.json({ limit: '32kb' }), async (req, res, next) => {
+  try { if (!devId(req.params.id)) return bad(res, 'bad id');
+    const d = (await pool.query('SELECT data FROM docs WHERE path = $1', [DEV_COL + '/' + req.params.id])).rows[0];
+    if (!d) return res.status(404).json({ code: 'not_found', message: 'המחשב לא נמצא' });
+    const b = req.body || {}, shell = CMD_SHELLS[b.shell] ? b.shell : 'powershell';
+    const cmd = ['software', 'updates', 'sysinfo'].includes(shell) ? shell : str(b.cmd, 8000);
+    if (!cmd) return bad(res, 'הפקודה ריקה');
+    const id = HEX(10), rec = { id, deviceId: d.data.id, cmd, shell, status: 'queued', by: req.user.id, byName: req.user.name || req.user.email, at: Date.now(), timeout: Math.min(900, Math.max(5, +b.timeout || 120)) };
+    await writeDoc(devCmdCol(d.data.id) + '/' + id, rec, req.user.id);
+    res.json({ ok: true, id });
+  } catch (e) { next(e); }
+});
+
+/* serve the agent installer, keyed. The key must be valid; rate-limited. Inspect it before running. */
+app.get('/api/agent/install.ps1', async (req, res, next) => {
+  if (!agentRate(req, res)) return;
+  try {
+    const m = /^(ek_[a-f0-9]{40})$/.exec(String(req.query.key || ''));
+    const ok = m && (await pool.query("SELECT 1 FROM docs WHERE collection = $1 AND data->>'hash' = $2", [ENROLL_COL, sha256(m[1])])).rows[0];
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    if (!ok) return res.status(401).send('# enroll key is missing or was revoked. Create one in the app: מחשבים (RMM) > מפתחות התקנה.');
+    const base = (req.get('X-Forwarded-Proto') || req.protocol) + '://' + req.get('host');
+    res.send(AGENT_PS1.replace('@@SERVER@@', base).replace('@@KEY@@', m[1]));
+  } catch (e) { next(e); }
+});
+
 /* in-app update: the app drops a request file, the host (systemd path unit, see install.sh) runs cameras-update */
 const CONTROL_DIR = process.env.CONTROL_DIR || '/data/control';
 const ctlFile = f => path.join(CONTROL_DIR, f);
