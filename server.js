@@ -1450,14 +1450,36 @@ const pubDevice = d => ({ id: d.id, name: d.name || d.hostname || d.id, hostname
 /* enrollment keys (one per customer/site, reusable to enroll many machines) */
 app.get('/api/enrollkeys', auth, async (req, res, next) => {
   try { const r = await pool.query('SELECT data FROM docs WHERE collection = $1', [ENROLL_COL]);
-    res.json(r.rows.map(x => ({ id: x.data.id, label: x.data.label, customerId: x.data.customerId || null, created: x.data.created, devices: x.data.devices || 0 }))); } catch (e) { next(e); }
+    res.json(r.rows.map(x => ({ id: x.data.id, label: x.data.label, key: x.data.key || null, customerId: x.data.customerId || null, created: x.data.created, devices: x.data.devices || 0 }))); } catch (e) { next(e); }
 });
 app.post('/api/enrollkeys', auth, csrf, express.json({ limit: '4kb' }), async (req, res, next) => {
   try {
     const id = HEX(8), key = 'ek_' + HEX(20);
-    const data = { id, hash: sha256(key), label: str(req.body && req.body.label, 60) || 'אתר חדש', customerId: str(req.body && req.body.customerId, 40) || null, created: Date.now(), by: req.user.id, devices: 0 };
+    const data = { id, hash: sha256(key), key, label: str(req.body && req.body.label, 60) || 'אתר חדש', customerId: str(req.body && req.body.customerId, 40) || null, created: Date.now(), by: req.user.id, devices: 0 };
     await writeDoc(ENROLL_COL + '/' + id, data, req.user.id);
     res.json({ id, key, label: data.label });
+  } catch (e) { next(e); }
+});
+/* a ready-to-run installer file, served as a download (admin only) */
+app.get('/api/enrollkeys/:id/install.cmd', auth, async (req, res, next) => {
+  try {
+    if (!can(req, 'devices', 2)) return denied(res);
+    if (!/^[a-f0-9]{16}$/.test(req.params.id)) return bad(res, 'bad id');
+    const row = (await pool.query('SELECT data FROM docs WHERE path = $1', [ENROLL_COL + '/' + req.params.id])).rows[0];
+    if (!row || !row.data.key) return res.status(404).json({ code: 'not_found', message: 'המפתח לא נמצא' });
+    const base = (req.get('X-Forwarded-Proto') || req.protocol) + '://' + req.get('host');
+    const url = base + '/api/agent/install.ps1?key=' + row.data.key;
+    const safe = (row.data.label || 'site').replace(/[^\w\u0590-\u05FF .-]/g, '').slice(0, 40) || 'site';
+    const cmd = [
+      '@echo off', 'chcp 65001>nul', 'title Toranit Agent',
+      'net session >nul 2>&1 || (powershell -NoProfile -Command "Start-Process \'%~f0\' -Verb RunAs" & exit /b)',
+      'echo Installing Toranit Agent...',
+      'powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iwr \'' + url + '\' -OutFile ($env:TEMP+\'\\toranit-agent.ps1\'); & ($env:TEMP+\'\\toranit-agent.ps1\')"',
+      'echo.', 'echo Done. You can close this window.', 'pause'
+    ].join('\r\n');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'attachment; filename="Toranit-Agent.cmd"; filename*=UTF-8\'\'' + encodeURIComponent('התקנת-סוכן-' + safe + '.cmd'));
+    res.send(cmd);
   } catch (e) { next(e); }
 });
 app.delete('/api/enrollkeys/:id', auth, csrf, async (req, res, next) => {
