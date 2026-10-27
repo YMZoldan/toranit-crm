@@ -1537,10 +1537,22 @@ app.post('/api/agent/beat', agentAuth, express.json({ limit: '256kb' }), async (
     if (Array.isArray(b.software)) dev.software = b.software.slice(0, 1000).map(x => ({ n: str(x && x.n, 120), v: str(x && x.v, 40), p: str(x && x.p, 80) })).filter(x => x.n);
     if (b.updates && typeof b.updates === 'object') dev.updates = { count: +b.updates.count || 0, titles: Array.isArray(b.updates.titles) ? b.updates.titles.slice(0, 50).map(t => str(t, 160)) : [], at: Date.now() };
     await writeDoc(DEV_COL + '/' + dev.id, dev, null);
-    const q = await pool.query("SELECT path, data FROM docs WHERE collection = $1 AND data->>'status' = 'queued' ORDER BY path LIMIT 20", [devCmdCol(dev.id)]);
-    const cmds = [];
-    for (const row of q.rows) { const c = row.data; c.status = 'sent'; c.sentAt = Date.now(); await writeDoc(row.path, c, null); cmds.push({ id: c.id, cmd: c.cmd, shell: c.shell || 'powershell', timeout: c.timeout || 120 }); }
-    res.json({ commands: cmds, interval: 30 });
+    // long-poll: hold the request briefly and return as soon as a command is queued, so the console feels instant
+    const grab = async () => {
+      const q = await pool.query("SELECT path, data FROM docs WHERE collection = $1 AND data->>'status' = 'queued' ORDER BY path LIMIT 20", [devCmdCol(dev.id)]);
+      const out = [];
+      for (const row of q.rows) { const c = row.data; c.status = 'sent'; c.sentAt = Date.now(); await writeDoc(row.path, c, null); out.push({ id: c.id, cmd: c.cmd, shell: c.shell || 'powershell', timeout: c.timeout || 120 }); }
+      return out;
+    };
+    let aborted = false; res.on('close', () => { aborted = true; });
+    let cmds = await grab();
+    const deadline = Date.now() + 25000;
+    while (!cmds.length && Date.now() < deadline && !aborted) {
+      await new Promise(r => setTimeout(r, 1200));
+      cmds = await grab();
+    }
+    if (aborted || res.writableEnded) return;
+    res.json({ commands: cmds, interval: 1 });
   } catch (e) { next(e); }
 });
 
