@@ -1,0 +1,21 @@
+# Deploy to the server on every push to main (or manually from the Actions tab).
+# Needs repository secrets: SERVER_HOST, SERVER_SSH_KEY (and optionally SERVER_PORT).
+# On the server, the key is locked to run only cameras-update, see README "עדכון אוטומטי".
+name: deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          username: root
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          command_timeout: 15m
+          script: /usr/local/bin/cameras-update

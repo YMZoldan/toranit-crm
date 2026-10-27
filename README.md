@@ -163,3 +163,21 @@ docker compose up -d --build
 - אחרי 10 ניסיונות כניסה כושלים מאותה כתובת, הכניסה נחסמת לרבע שעה.
 - כל פעולת שינוי דורשת כותרת ייעודית שמונעת CSRF.
 - מסד הנתונים לא חשוף מחוץ לשרת. רק האפליקציה מחוברת לרשת של Traefik.
+
+## עדכון אוטומטי מ־GitHub
+כל דחיפה ל־`main` מריצה `cameras-update` בשרת (`.github/workflows/deploy.yml`).
+
+**הגדרה חד־פעמית בשרת:**
+```bash
+ssh-keygen -t ed25519 -f /root/.ssh/gh_deploy -N "" -C "github-actions"
+echo "command=\"/usr/local/bin/cameras-update\",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty $(cat /root/.ssh/gh_deploy.pub)" >> /root/.ssh/authorized_keys
+cat /root/.ssh/gh_deploy        # המפתח הפרטי, להדבקה ב־GitHub בלבד
+```
+המפתח הזה יכול רק להריץ עדכון, שום דבר אחר.
+
+**ב־GitHub:** Settings ← Secrets and variables ← Actions ← New repository secret:
+- `SERVER_HOST`: כתובת ה־IP של השרת
+- `SERVER_SSH_KEY`: כל הפלט של `cat /root/.ssh/gh_deploy`
+- `SERVER_PORT`: רק אם SSH לא על פורט 22
+
+אחר כך מחק מהשרת את `/root/.ssh/gh_deploy` (הפרטי). בדיקה: Actions ← deploy ← Run workflow.
