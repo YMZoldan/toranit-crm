@@ -1614,9 +1614,9 @@ app.get('/api/agent/install.ps1', async (req, res, next) => {
     const m = /^(ek_[a-f0-9]{40})$/.exec(String(req.query.key || ''));
     const ok = m && (await pool.query("SELECT 1 FROM docs WHERE collection = $1 AND data->>'hash' = $2", [ENROLL_COL, sha256(m[1])])).rows[0];
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    if (!ok) return res.status(401).send('# enroll key is missing or was revoked. Create one in the app: מחשבים (RMM) > מפתחות התקנה.');
+    if (!ok) return res.status(401).send('# enroll key is missing or was revoked. Create a new one in the app under Computers (RMM).');
     const base = (req.get('X-Forwarded-Proto') || req.protocol) + '://' + req.get('host');
-    res.send(AGENT_PS1.replace('@@SERVER@@', base).replace('@@KEY@@', m[1]));
+    res.send('﻿' + AGENT_PS1.replace('@@SERVER@@', base).replace('@@KEY@@', m[1]));
   } catch (e) { next(e); }
 });
 

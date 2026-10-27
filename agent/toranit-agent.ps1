@@ -1,5 +1,5 @@
 <#
-  Toranit Agent — RMM agent for computers you are authorized to manage.
+  Toranit Agent - RMM agent for computers you are authorized to manage.
   Installs openly as a Windows Scheduled Task named "ToranitAgent" (visible in Task Scheduler),
   reports status to your Toranit server, and runs commands an admin queues there.
   Every command is logged on the server. This agent does not hide itself and does not touch antivirus.
@@ -81,13 +81,13 @@ function Get-PendingUpdates {
     $r=$s.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Software' and IsHidden=0")
     $titles=@(); foreach($u in $r.Updates){ $titles+=$u.Title }
     return @{ count=$r.Updates.Count; titles=$titles }
-  }catch{ return @{ count=-1; titles=@("לא ניתן לבדוק עדכונים: $($_.Exception.Message)") } }
+  }catch{ return @{ count=-1; titles=@("Could not check updates: $($_.Exception.Message)") } }
 }
 function Run-Shell($cmd,$shell,$timeout){
   $sb = if($shell -eq 'cmd'){ { param($c) & cmd.exe /c $c 2>&1 | Out-String } } else { { param($c) powershell -NoProfile -ExecutionPolicy Bypass -Command $c 2>&1 | Out-String } }
   $job=Start-Job -ScriptBlock $sb -ArgumentList $cmd
   if(Wait-Job $job -Timeout $timeout){ $out=Receive-Job $job; $st='done'; $ex=0 }
-  else { Stop-Job $job -ErrorAction SilentlyContinue; $out="— הפקודה חרגה מהזמן המותר ($timeout שניות) ובוטלה —"; $st='error'; $ex=124 }
+  else { Stop-Job $job -ErrorAction SilentlyContinue; $out="[command timed out after $timeout seconds and was cancelled]"; $st='error'; $ex=124 }
   Remove-Job $job -Force -ErrorAction SilentlyContinue
   return @{ output=$out; status=$st; exit=$ex }
 }
@@ -110,8 +110,8 @@ while($true){
     foreach($c in $resp.commands){
       $res=$null
       switch($c.shell){
-        'software' { $script:pendSoftware=$true; $n=(@(Get-Software)).Count; $res=@{ output="נאספה רשימת תוכנות: $n פריטים. מופיעה בכרטיס המחשב." ; status='done'; exit=0 } }
-        'updates'  { $u=Get-PendingUpdates; $script:pendUpdates=$true; $res=@{ output=("עדכונים ממתינים: {0}`n{1}" -f $u.count,(($u.titles) -join "`n")); status='done'; exit=0 } }
+        'software' { $script:pendSoftware=$true; $n=(@(Get-Software)).Count; $res=@{ output="Collected software list: $n items. Shown in the computer card." ; status='done'; exit=0 } }
+        'updates'  { $u=Get-PendingUpdates; $script:pendUpdates=$true; $res=@{ output=("Pending updates: {0}`n{1}" -f $u.count,(($u.titles) -join "`n")); status='done'; exit=0 } }
         'sysinfo'  { $m=Get-Metrics; $res=@{ output=($m | ConvertTo-Json); status='done'; exit=0 } }
         default    { $res=Run-Shell $c.cmd $c.shell ([int]$c.timeout) }
       }
