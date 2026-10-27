@@ -141,17 +141,43 @@ using System;using System.Runtime.InteropServices;
 public class RI {
  [DllImport("user32.dll")] public static extern bool SetCursorPos(int X,int Y);
  [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags,uint dx,uint dy,int dwData,UIntPtr dwExtraInfo);
+ [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd,int nIndex);
+ [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd,int nIndex,int dwNewLong);
+ [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd,int nCmdShow);
+ [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd,IntPtr hWndInsertAfter,int X,int Y,int cx,int cy,uint uFlags);
 }
 "@
+  # on-screen indicator shown on the managed PC while a remote session is active
+  $bTxt=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('16nXnNeZ15jXlCDXnteo15fXldenINek16LXmdec15QgICAgIFRvcmFuaXQ='))
+  $banner=New-Object System.Windows.Forms.Form
+  $banner.FormBorderStyle=[System.Windows.Forms.FormBorderStyle]::None; $banner.ShowInTaskbar=$false; $banner.TopMost=$true
+  $banner.StartPosition=[System.Windows.Forms.FormStartPosition]::Manual
+  $banner.BackColor=[System.Drawing.Color]::FromArgb(200,45,35)
+  $lab=New-Object System.Windows.Forms.Label; $lab.Dock=[System.Windows.Forms.DockStyle]::Fill; $lab.TextAlign=[System.Drawing.ContentAlignment]::MiddleCenter
+  $lab.ForeColor=[System.Drawing.Color]::White; $lab.Font=New-Object System.Drawing.Font('Segoe UI',10,[System.Drawing.FontStyle]::Bold); $lab.Text=$bTxt
+  $banner.Controls.Add($lab)
+  $wa=[System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+  $banner.Size=New-Object System.Drawing.Size(360,32)
+  $banner.Location=New-Object System.Drawing.Point(([int]($wa.X+($wa.Width-360)/2)),($wa.Y+6))
+  $bh=$banner.Handle
+  $ex=[RI]::GetWindowLong($bh,-20); [RI]::SetWindowLong($bh,-20,($ex -bor 0x20 -bor 0x80 -bor 0x08000000)) | Out-Null  # TRANSPARENT|TOOLWINDOW|NOACTIVATE
+  $shown=$false
   $token=Wait-Token
   while($true){
     try{
       $r=Call '/api/agent/remote' @{} $token
       if($r.active){
+        if(-not $shown){ [RI]::ShowWindow($bh,8) | Out-Null; $shown=$true }   # SW_SHOWNA
+        [RI]::SetWindowPos($bh,[IntPtr](-1),0,0,0,0,0x13) | Out-Null           # HWND_TOPMOST, NOSIZE|NOMOVE|NOACTIVATE
+        [System.Windows.Forms.Application]::DoEvents()
         if($r.inputs){ foreach($ev in $r.inputs){ try{ Inject $ev }catch{} } }
         $b=Get-Screen; if($b -and $b.Length){ Send-Frame $token $b }
         Start-Sleep -Milliseconds 120
-      } else { Start-Sleep -Milliseconds 300 }
+      } else {
+        if($shown){ [RI]::ShowWindow($bh,0) | Out-Null; $shown=$false }        # SW_HIDE
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 300
+      }
     }catch{
       if($_.Exception.Response.StatusCode.value__ -eq 401){ $token=Wait-Token }
       Start-Sleep -Seconds 2
