@@ -197,7 +197,13 @@ function Run-Diag {
   Write-Host ("Server: "+$Server)
   Write-Host ("Running as: "+[System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
   $s=Load-State
-  if($s -and $s.token){ &$ok ("Token found (device "+$s.deviceId+")") } else { &$bad ("No token in "+$State+" - the SYSTEM agent may not have enrolled yet; wait a minute after install") }
+  if($s -and $s.token){ &$ok ("Token found (device "+$s.deviceId+")") } else {
+    &$bad ("No token in "+$State)
+    Write-Host ("Enroll key baked in: "+$Key.Substring(0,[Math]::Min(9,$Key.Length))+"...")
+    Write-Host "Trying to enroll now..." -ForegroundColor Cyan
+    try{ $tk=Enroll; if($tk){ &$ok "Enrolled successfully - token saved. The computer should appear in the CRM within a minute." ; $s=Load-State } else { &$bad "Enroll returned no token" } }
+    catch{ $code=''; try{ if($_.Exception.Response){ $code=' (HTTP '+$_.Exception.Response.StatusCode.value__+')' } }catch{}; &$bad ('Enroll FAILED'+$code+': '+$_.Exception.Message) }
+  }
   try{ Add-Type -AssemblyName System.Windows.Forms,System.Drawing; &$ok "Loaded Windows.Forms/Drawing" }catch{ &$bad ("Assemblies: "+$_.Exception.Message) }
   try{ $b=Get-Screen; &$ok ("Screen capture "+$b.Length+" bytes ("+$script:VS.Width+"x"+$script:VS.Height+")") }catch{ &$bad ("Screen capture: "+$_.Exception.Message) }
   try{
