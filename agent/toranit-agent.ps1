@@ -60,6 +60,8 @@ function Install-Agent {
 function Uninstall-Agent {
   Unregister-ScheduledTask -TaskName ($Task + 'User') -Confirm:$false -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $Task -Confirm:$false -ErrorAction SilentlyContinue
+  # stop any running agent processes (so it cannot re-enroll and recreate its files), except this uninstaller
+  try { Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*toranit-agent*' -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } } catch {}
   Remove-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ToranitAgent' -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue
   Write-Host "Toranit Agent removed." -ForegroundColor Yellow
