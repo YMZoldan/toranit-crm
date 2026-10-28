@@ -232,6 +232,44 @@ if($Diag){ Run-Diag; return }
 if($User){ Run-UserHelper; return }
 if(-not $Run){ Install-Agent; return }
 
+# ---- VNC reverse tunnel: bridge the local VNC server (127.0.0.1:5900) out to the Toranit server ----
+function Start-VncTunnel($token){
+  if($script:vncJob -and $script:vncJob.State -eq 'Running'){ return }
+  if($script:vncJob){ try{ Remove-Job $script:vncJob -Force }catch{} ; $script:vncJob=$null }
+  $script:vncJob = Start-Job -ScriptBlock {
+    param($server,$token)
+    try{
+      $wsurl = ($server -replace '^http','ws') + '/api/agent/vnc?token=' + $token
+      $ws = New-Object System.Net.WebSockets.ClientWebSocket
+      $cts = New-Object System.Threading.CancellationTokenSource
+      $ws.ConnectAsync([Uri]$wsurl, $cts.Token).GetAwaiter().GetResult()
+      $tcp = New-Object System.Net.Sockets.TcpClient
+      $tcp.Connect('127.0.0.1',5900)
+      $stream = $tcp.GetStream()
+      $rbuf = New-Object byte[] 65536
+      $recvSeg = New-Object System.ArraySegment[byte] -ArgumentList (,$rbuf)
+      $recvTask = $ws.ReceiveAsync($recvSeg, $cts.Token)
+      $sbuf = New-Object byte[] 65536
+      while($ws.State -eq [System.Net.WebSockets.WebSocketState]::Open -and $tcp.Connected){
+        $did=$false
+        if($recvTask.IsCompleted){
+          $res=$recvTask.Result
+          if($res.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close){ break }
+          if($res.Count -gt 0){ $stream.Write($rbuf,0,$res.Count); $stream.Flush() }
+          $recvTask = $ws.ReceiveAsync($recvSeg, $cts.Token); $did=$true
+        }
+        if($stream.DataAvailable){
+          $n=$stream.Read($sbuf,0,$sbuf.Length)
+          if($n -gt 0){ $seg=New-Object System.ArraySegment[byte] -ArgumentList $sbuf,0,$n; $ws.SendAsync($seg,[System.Net.WebSockets.WebSocketMessageType]::Binary,$true,$cts.Token).GetAwaiter().GetResult() }
+          $did=$true
+        }
+        if(-not $did){ Start-Sleep -Milliseconds 5 }
+      }
+    }catch{}
+    finally{ try{ $ws.Dispose() }catch{}; try{ $tcp.Close() }catch{} }
+  } -ArgumentList $Server,$token
+}
+
 # ---- run loop ----
 $script:pendSoftware=$false; $script:pendUpdates=$false
 $interval=30
@@ -244,6 +282,7 @@ while($true){
     if($script:pendUpdates){ $beat.updates=(Get-PendingUpdates); $script:pendUpdates=$false }
     $resp=Call '/api/agent/beat' $beat $token
     if($resp.interval){ $interval=[int]$resp.interval }
+    if($resp.vnc){ Start-VncTunnel $token }
     foreach($c in $resp.commands){
       $res=$null
       switch($c.shell){

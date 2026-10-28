@@ -15,6 +15,7 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const WebSocket = require('ws');
 
 const PORT = +process.env.PORT || 3000;
 const SECRET = process.env.SESSION_SECRET || '';
@@ -1545,14 +1546,15 @@ app.post('/api/agent/beat', agentAuth, express.json({ limit: '256kb' }), async (
       return out;
     };
     let aborted = false; res.on('close', () => { aborted = true; });
+    const vncWanted = () => { const s = remoteSess.get(dev.id); return !!(s && s.vnc && Date.now() < s.until); };
     let cmds = await grab();
     const deadline = Date.now() + 25000;
-    while (!cmds.length && Date.now() < deadline && !aborted) {
+    while (!cmds.length && !vncWanted() && Date.now() < deadline && !aborted) {
       await new Promise(r => setTimeout(r, 1200));
       cmds = await grab();
     }
     if (aborted || res.writableEnded) return;
-    res.json({ commands: cmds, interval: 1 });
+    res.json({ commands: cmds, interval: 1, vnc: vncWanted() });
   } catch (e) { next(e); }
 });
 
@@ -1890,6 +1892,55 @@ async function main() {
     console.log('no users yet: run  docker compose exec app node server.js adduser <email> <password>');
   }
   const server = app.listen(PORT, () => console.log('listening on', PORT));
+  // ---- VNC bridge: browser noVNC <-(ws)-> server <-(ws)-> agent reverse tunnel <-> localhost VNC ----
+  const vncBridges = new Map(); // deviceId -> { browser, agent }
+  const wssVnc = new WebSocket.Server({ noServer: true });
+  function linkBridge(id) {
+    const b = vncBridges.get(id); if (!b || !b.browser || !b.agent) return;
+    const { browser, agent } = b; b.linked = true;
+    const pipe = (from, to) => from.on('message', (data, isBinary) => { if (to.readyState === 1) to.send(data, { binary: isBinary }); });
+    pipe(browser, agent); pipe(agent, browser);
+    const closeBoth = () => { try { browser.close(); } catch (e) {} try { agent.close(); } catch (e) {} vncBridges.delete(id); const s = remoteSess.get(id); if (s) s.vnc = false; };
+    browser.on('close', closeBoth); agent.on('close', closeBoth); browser.on('error', closeBoth); agent.on('error', closeBoth);
+  }
+  server.on('upgrade', (req, socket, head) => {
+    let url; try { url = new URL(req.url, 'http://x'); } catch (e) { return socket.destroy(); }
+    const mb = url.pathname.match(/^\/api\/devices\/([a-f0-9]{20})\/vnc$/);
+    if (mb) {
+      (async () => {
+        try {
+          const s = verify(readCookies(req)[COOKIE]); if (!s) return socket.destroy();
+          const u = (await pool.query('SELECT role, perms, disabled FROM users WHERE id = $1', [s.uid])).rows[0];
+          if (!u || u.disabled || (effPerms({ role: u.role, perms: u.perms }).devices || 0) < 2) return socket.destroy();
+          const id = mb[1];
+          wssVnc.handleUpgrade(req, socket, head, ws => {
+            const b = vncBridges.get(id) || {}; if (b.browser) { try { b.browser.close(); } catch (e) {} } b.browser = ws; vncBridges.set(id, b);
+            let sess = remoteSess.get(id); if (!sess) { sess = { until: 0, inputs: [] }; remoteSess.set(id, sess); } sess.vnc = true; sess.until = Date.now() + REMOTE_TTL;
+            ws.on('close', () => { const bb = vncBridges.get(id); if (bb) { bb.browser = null; if (!bb.agent) vncBridges.delete(id); } const sx = remoteSess.get(id); if (sx) sx.vnc = false; });
+            linkBridge(id);
+          });
+        } catch (e) { try { socket.destroy(); } catch (_) {} }
+      })();
+      return;
+    }
+    if (url.pathname === '/api/agent/vnc') {
+      (async () => {
+        try {
+          const m2 = /^(ag_[a-f0-9]{48})$/.exec(url.searchParams.get('token') || ''); if (!m2) return socket.destroy();
+          const dev = (await pool.query("SELECT data FROM docs WHERE collection = $1 AND data->>'tokenHash' = $2", [DEV_COL, sha256(m2[1])])).rows[0];
+          if (!dev) return socket.destroy();
+          const id = dev.data.id;
+          wssVnc.handleUpgrade(req, socket, head, ws => {
+            const b = vncBridges.get(id) || {}; if (b.agent) { try { b.agent.close(); } catch (e) {} } b.agent = ws; vncBridges.set(id, b);
+            ws.on('close', () => { const bb = vncBridges.get(id); if (bb) { bb.agent = null; if (!bb.browser) vncBridges.delete(id); } });
+            linkBridge(id);
+          });
+        } catch (e) { try { socket.destroy(); } catch (_) {} }
+      })();
+      return;
+    }
+    socket.destroy();
+  });
   const autoSync = async () => { try { if (await getSumitCreds()) { try { const c = await syncCustomersFromSumit(null); console.log('sumit customers sync:', JSON.stringify(Object.assign({}, c.stats, { sampleKeys: undefined }))); } catch (e) { console.log('sumit customers sync failed:', e.message); } const r = await syncFromSumit(null, 120); console.log('sumit sync:', JSON.stringify(r.stats)); } } catch (e) { console.log('sumit sync failed:', e.message); } };
   if (process.env.SUMIT_AUTO_SYNC !== 'false') { setTimeout(autoSync, 90e3).unref(); setInterval(autoSync, 60 * 60e3).unref(); }
   const srcTick = () => runDueSources().catch(e => console.log('price list sources failed:', e.message));
