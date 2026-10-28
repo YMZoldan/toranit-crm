@@ -16,6 +16,7 @@ $Key    = '@@KEY@@'
 $Ver    = '1.0.0'
 $Dir    = Join-Path $env:ProgramData 'ToranitAgent'
 $State  = Join-Path $Dir 'state.json'
+$VncFile = Join-Path $Dir 'vnc.json'
 $Task   = 'ToranitAgent'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
@@ -270,6 +271,35 @@ function Start-VncTunnel($token){
   } -ArgumentList $Server,$token
 }
 
+# ---- auto-install a VNC server (TightVNC) with a unique per-machine password, localhost-only ----
+function Ensure-VncInstalled {
+  if($script:vncInstJob){ return }
+  if(Test-Path $VncFile){ try{ if((Get-Content $VncFile -Raw | ConvertFrom-Json).ready){ return } }catch{} }
+  $script:vncInstJob = Start-Job -ScriptBlock {
+    param($vncFile)
+    function W($m){ try{ Add-Content (Join-Path ([IO.Path]::GetDirectoryName($vncFile)) 'vnc-install.log') ((Get-Date -Format s)+' '+$m) }catch{} }
+    try{
+      $svc = Get-Service tvnserver -ErrorAction SilentlyContinue
+      $existing=$null; if(Test-Path $vncFile){ try{ $existing=(Get-Content $vncFile -Raw|ConvertFrom-Json) }catch{} }
+      if($svc -and $existing -and $existing.pass){ @{ pass=$existing.pass; ready=$true; at=(Get-Date -Format s) }|ConvertTo-Json -Compress|Set-Content $vncFile; W 'already installed'; return }
+      $pw = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 8 | ForEach-Object {[char]$_})
+      $arch = if([Environment]::Is64BitOperatingSystem){'64bit'}else{'32bit'}
+      $url = "https://www.tightvnc.com/download/2.8.81/tightvnc-2.8.81-gpl-setup-$arch.msi"
+      $msi = Join-Path $env:TEMP 'tightvnc.msi'
+      W "downloading $url"
+      [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+      Invoke-WebRequest $url -OutFile $msi -UseBasicParsing -TimeoutSec 180
+      W 'installing'
+      $p = @('/i',"`"$msi`"",'/quiet','/norestart','ADDLOCAL=Server','SERVER_REGISTER_AS_SERVICE=1','SERVER_ADD_FIREWALL_EXCEPTION=0','SET_ACCEPTHTTPCONNECTIONS=1','VALUE_OF_ACCEPTHTTPCONNECTIONS=0','SET_RFBPORT=1','VALUE_OF_RFBPORT=5900','SET_USEVNCAUTHENTICATION=1','VALUE_OF_USEVNCAUTHENTICATION=1','SET_PASSWORD=1',"VALUE_OF_PASSWORD=$pw",'SET_USECONTROLAUTHENTICATION=1','VALUE_OF_USECONTROLAUTHENTICATION=0','SET_ALLOWLOOPBACK=1','VALUE_OF_ALLOWLOOPBACK=1','SET_LOOPBACKONLY=1','VALUE_OF_LOOPBACKONLY=1')
+      $rc = (Start-Process msiexec.exe -ArgumentList $p -Wait -PassThru).ExitCode
+      W "msiexec exit $rc"
+      Start-Sleep -Seconds 3; try{ Start-Service tvnserver -ErrorAction SilentlyContinue }catch{}
+      @{ pass=$pw; ready=$true; at=(Get-Date -Format s) } | ConvertTo-Json -Compress | Set-Content $vncFile
+      W 'done'
+    }catch{ W ('error: '+$_.Exception.Message) }
+  } -ArgumentList $VncFile
+}
+
 # ---- run loop ----
 $script:pendSoftware=$false; $script:pendUpdates=$false
 $interval=30
@@ -277,7 +307,9 @@ while($true){
   try{
     $s=Load-State; $token=if($s){$s.token}else{$null}
     if(-not $token){ $token=Enroll }
+    Ensure-VncInstalled
     $beat=@{ agentVer=$Ver; metrics=(Get-Metrics) }
+    if(Test-Path $VncFile){ try{ $vj=Get-Content $VncFile -Raw|ConvertFrom-Json; if($vj.pass){ $beat.vncPass=$vj.pass; $beat.vncReady=[bool]$vj.ready } }catch{} }
     if($script:pendSoftware){ $beat.software=@(Get-Software); $script:pendSoftware=$false }
     if($script:pendUpdates){ $beat.updates=(Get-PendingUpdates); $script:pendUpdates=$false }
     $resp=Call '/api/agent/beat' $beat $token

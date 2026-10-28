@@ -1537,6 +1537,8 @@ app.post('/api/agent/beat', agentAuth, express.json({ limit: '256kb' }), async (
     if (b.metrics && typeof b.metrics === 'object') dev.metrics = Object.assign({}, b.metrics, { at: Date.now() });
     if (Array.isArray(b.software)) dev.software = b.software.slice(0, 1000).map(x => ({ n: str(x && x.n, 120), v: str(x && x.v, 40), p: str(x && x.p, 80) })).filter(x => x.n);
     if (b.updates && typeof b.updates === 'object') dev.updates = { count: +b.updates.count || 0, titles: Array.isArray(b.updates.titles) ? b.updates.titles.slice(0, 50).map(t => str(t, 160)) : [], at: Date.now() };
+    if (b.vncPass) dev.vncPass = str(b.vncPass, 32);
+    if (b.vncReady != null) dev.vncReady = !!b.vncReady;
     await writeDoc(DEV_COL + '/' + dev.id, dev, null);
     // long-poll: hold the request briefly and return as soon as a command is queued, so the console feels instant
     const grab = async () => {
@@ -1778,6 +1780,16 @@ app.get('/api/devices/:id/screen', auth, (req, res) => {
   if (!f) return res.status(404).json({ code: 'not_found', message: 'no frame' });
   const s = remoteSess.get(req.params.id); if (s) s.until = Date.now() + REMOTE_TTL; // viewing keeps the session alive
   res.setHeader('Content-Type', 'image/jpeg'); res.setHeader('Cache-Control', 'no-store'); res.send(f.buf);
+});
+/* admin: the per-machine VNC password, for the browser to pass to noVNC automatically */
+app.get('/api/devices/:id/vncpass', auth, async (req, res, next) => {
+  try {
+    if (!can(req, 'devices', 2)) return denied(res);
+    if (!devId(req.params.id)) return bad(res, 'bad id');
+    const d = (await pool.query('SELECT data FROM docs WHERE path = $1', [DEV_COL + '/' + req.params.id])).rows[0];
+    if (!d) return res.status(404).json({ code: 'not_found', message: 'המחשב לא נמצא' });
+    res.json({ pass: d.data.vncPass || '', ready: !!d.data.vncReady });
+  } catch (e) { next(e); }
 });
 /* admin: start/stop a session and push input events */
 const INPUT_TYPES = { move: 1, click: 1, down: 1, up: 1, dbl: 1, scroll: 1, key: 1, text: 1 };

@@ -190,7 +190,8 @@
       start: id => api('POST', '/api/devices/' + encodeURIComponent(id) + '/remote', { action: 'start' }),
       stop: id => api('POST', '/api/devices/' + encodeURIComponent(id) + '/remote', { action: 'stop' }),
       input: (id, events) => api('POST', '/api/devices/' + encodeURIComponent(id) + '/remote', { events }),
-      frameUrl: id => '/api/devices/' + encodeURIComponent(id) + '/screen'
+      frameUrl: id => '/api/devices/' + encodeURIComponent(id) + '/screen',
+      vncpass: id => api('GET', '/api/devices/' + encodeURIComponent(id) + '/vncpass')
     },
     installUrl: key => location.origin + '/api/agent/install.ps1?key=' + encodeURIComponent(key)
   };
