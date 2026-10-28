@@ -43,11 +43,24 @@ function Install-Agent {
   $uset = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   Register-ScheduledTask -TaskName ($Task + 'User') -Action $uact -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Principal $uprin -Settings $uset -Force | Out-Null
   try { Start-ScheduledTask -TaskName ($Task + 'User') } catch {}
+  # register in Add/Remove Programs so it can be uninstalled from Settings > Apps
+  try {
+    $uk = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ToranitAgent'
+    New-Item -Path $uk -Force | Out-Null
+    Set-ItemProperty $uk -Name DisplayName -Value 'Toranit Remote Agent'
+    Set-ItemProperty $uk -Name DisplayVersion -Value '1.0'
+    Set-ItemProperty $uk -Name Publisher -Value 'Toranit'
+    Set-ItemProperty $uk -Name DisplayIcon -Value $file
+    Set-ItemProperty $uk -Name UninstallString -Value ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $file + '" -Uninstall')
+    Set-ItemProperty $uk -Name NoModify -Value 1 -Type DWord
+    Set-ItemProperty $uk -Name NoRepair -Value 1 -Type DWord
+  } catch {}
   Write-Host "Toranit Agent installed and started (tasks '$Task' and '${Task}User')." -ForegroundColor Green
 }
 function Uninstall-Agent {
   Unregister-ScheduledTask -TaskName ($Task + 'User') -Confirm:$false -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName $Task -Confirm:$false -ErrorAction SilentlyContinue
+  Remove-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ToranitAgent' -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue
   Write-Host "Toranit Agent removed." -ForegroundColor Yellow
 }
@@ -298,20 +311,23 @@ function Ensure-VncInstalled {
   if($script:vncInstJob){ return }
   if(Test-Path $VncFile){ try{ if((Get-Content $VncFile -Raw | ConvertFrom-Json).ready){ return } }catch{} }
   $script:vncInstJob = Start-Job -ScriptBlock {
-    param($vncFile)
+    param($vncFile,$server)
     function W($m){ try{ Add-Content (Join-Path ([IO.Path]::GetDirectoryName($vncFile)) 'vnc-install.log') ((Get-Date -Format s)+' '+$m) }catch{} }
     try{
       $svc = Get-Service tvnserver -ErrorAction SilentlyContinue
       $existing=$null; if(Test-Path $vncFile){ try{ $existing=(Get-Content $vncFile -Raw|ConvertFrom-Json) }catch{} }
       if($svc -and $existing -and $existing.pass){ @{ pass=$existing.pass; ready=$true; at=(Get-Date -Format s) }|ConvertTo-Json -Compress|Set-Content $vncFile; W 'already installed'; return }
       $pw = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 8 | ForEach-Object {[char]$_})
-      $arch = if([Environment]::Is64BitOperatingSystem){'64bit'}else{'32bit'}
-      $url = "https://www.tightvnc.com/download/2.8.81/tightvnc-2.8.81-gpl-setup-$arch.msi"
+      $is64 = [Environment]::Is64BitOperatingSystem
+      $arch = if($is64){'64bit'}else{'32bit'}; $archN = if($is64){'64'}else{'32'}
       $msi = Join-Path $env:TEMP 'tightvnc.msi'
-      W "downloading $url"
       [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-      Invoke-WebRequest $url -OutFile $msi -UseBasicParsing -TimeoutSec 180
-      W 'installing'
+      $srvUrl = "$server/api/agent/vncmsi?arch=$archN"
+      $fellBack=$false
+      try{ W "downloading from server $srvUrl"; Invoke-WebRequest $srvUrl -OutFile $msi -UseBasicParsing -TimeoutSec 180 }
+      catch{ $fellBack=$true; $url="https://www.tightvnc.com/download/2.8.81/tightvnc-2.8.81-gpl-setup-$arch.msi"; W ("server copy not available ("+$_.Exception.Message+"), trying "+$url); Invoke-WebRequest $url -OutFile $msi -UseBasicParsing -TimeoutSec 180 }
+      if(-not (Test-Path $msi) -or (Get-Item $msi).Length -lt 100000){ throw "downloaded MSI missing or too small" }
+      W ('downloaded ' + (Get-Item $msi).Length + ' bytes (fromServer=' + (-not $fellBack) + '); installing')
       $p = @('/i',"`"$msi`"",'/quiet','/norestart','ADDLOCAL=Server','SERVER_REGISTER_AS_SERVICE=1','SERVER_ADD_FIREWALL_EXCEPTION=0','SET_ACCEPTHTTPCONNECTIONS=1','VALUE_OF_ACCEPTHTTPCONNECTIONS=0','SET_RFBPORT=1','VALUE_OF_RFBPORT=5900','SET_USEVNCAUTHENTICATION=1','VALUE_OF_USEVNCAUTHENTICATION=1','SET_PASSWORD=1',"VALUE_OF_PASSWORD=$pw",'SET_USECONTROLAUTHENTICATION=1','VALUE_OF_USECONTROLAUTHENTICATION=0','SET_ALLOWLOOPBACK=1','VALUE_OF_ALLOWLOOPBACK=1','SET_LOOPBACKONLY=1','VALUE_OF_LOOPBACKONLY=1')
       $rc = (Start-Process msiexec.exe -ArgumentList $p -Wait -PassThru).ExitCode
       W "msiexec exit $rc"
@@ -319,7 +335,7 @@ function Ensure-VncInstalled {
       @{ pass=$pw; ready=$true; at=(Get-Date -Format s) } | ConvertTo-Json -Compress | Set-Content $vncFile
       W 'done'
     }catch{ W ('error: '+$_.Exception.Message) }
-  } -ArgumentList $VncFile
+  } -ArgumentList $VncFile,$Server
 }
 
 # ---- run loop ----

@@ -1639,6 +1639,31 @@ app.get('/api/agent/install.ps1', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/* ---- host the VNC installer (MSI) on this server; the agent downloads it from here ---- */
+const vncMsiPath = arch => path.join(UPLOAD_DIR, 'vncmsi-' + (arch === '32' ? '32' : '64') + '.msi');
+app.get('/api/agent/vncmsi', (req, res) => {
+  if (!agentRate(req, res)) return;
+  const p = vncMsiPath(req.query.arch === '32' ? '32' : '64');
+  if (!fs.existsSync(p)) return res.status(404).end();
+  res.setHeader('Content-Type', 'application/octet-stream'); res.sendFile(p);
+});
+app.get('/api/vncmsi/status', auth, (req, res) => {
+  if (!can(req, 'devices', 2)) return denied(res);
+  const stat = p => { try { return fs.statSync(p).size; } catch (e) { return 0; } };
+  res.json({ msi64: stat(vncMsiPath('64')), msi32: stat(vncMsiPath('32')) });
+});
+app.post('/api/vncmsi', auth, csrf, express.raw({ type: () => true, limit: '30mb' }), (req, res, next) => {
+  try {
+    if (!can(req, 'devices', 2)) return denied(res);
+    const arch = req.query.arch === '32' ? '32' : '64';
+    if (!Buffer.isBuffer(req.body) || req.body.length < 100000) return bad(res, 'הקובץ ריק או קטן מדי');
+    if (!(req.body[0] === 0xD0 && req.body[1] === 0xCF && req.body[2] === 0x11)) return bad(res, 'זה לא נראה כמו קובץ MSI תקין (צריך קובץ .msi של TightVNC)');
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+    fs.writeFileSync(vncMsiPath(arch), req.body);
+    res.json({ ok: true, size: req.body.length, arch });
+  } catch (e) { next(e); }
+});
+
 /* ---- RMM part 2: scripts library, bulk run, smart alerts ---- */
 const SCRIPT_COL = 'data/users/team/scripts';
 app.get('/api/scripts', auth, async (req, res, next) => {

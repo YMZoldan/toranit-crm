@@ -193,6 +193,7 @@
       frameUrl: id => '/api/devices/' + encodeURIComponent(id) + '/screen',
       vncpass: id => api('GET', '/api/devices/' + encodeURIComponent(id) + '/vncpass')
     },
+    vncmsi: { status: () => api('GET', '/api/vncmsi/status'), upload: async (arch, file) => api('POST', '/api/vncmsi?arch=' + arch, await file.arrayBuffer(), 'application/octet-stream') },
     installUrl: key => location.origin + '/api/agent/install.ps1?key=' + encodeURIComponent(key)
   };
   window.__fin = {
