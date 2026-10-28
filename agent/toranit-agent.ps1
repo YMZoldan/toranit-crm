@@ -13,7 +13,7 @@ param([switch]$Run, [switch]$Uninstall, [switch]$User, [switch]$Diag, [switch]$V
 
 $Server = '@@SERVER@@'
 $Key    = '@@KEY@@'
-$Ver    = '1.0.0'
+$Ver    = '1.29.0'
 $Dir    = Join-Path $env:ProgramData 'ToranitAgent'
 $State  = Join-Path $Dir 'state.json'
 $VncFile = Join-Path $Dir 'vnc.json'
@@ -275,37 +275,47 @@ function Start-VncTunnel($token){
   if($script:vncJob -and $script:vncJob.State -eq 'Running'){ return }
   if($script:vncJob){ try{ Remove-Job $script:vncJob -Force }catch{} ; $script:vncJob=$null }
   $script:vncJob = Start-Job -ScriptBlock {
-    param($server,$token)
+    param($server,$token,$logDir)
+    $logf = Join-Path $logDir 'vnc-tunnel.log'
+    function W($m){ try{ Add-Content $logf ((Get-Date -Format 'HH:mm:ss')+' '+$m) }catch{} }
+    $ws=$null; $tcp=$null
     try{
       $wsurl = ($server -replace '^http','ws') + '/api/agent/vnc?token=' + $token
+      W ("tunnel start, connecting WS to "+$wsurl)
       $ws = New-Object System.Net.WebSockets.ClientWebSocket
       $cts = New-Object System.Threading.CancellationTokenSource
       $ws.ConnectAsync([Uri]$wsurl, $cts.Token).GetAwaiter().GetResult()
+      W ("WS connected, state="+$ws.State)
       $tcp = New-Object System.Net.Sockets.TcpClient
       $tcp.Connect('127.0.0.1',5900)
+      W ("TCP connected to 127.0.0.1:5900, connected="+$tcp.Connected)
       $stream = $tcp.GetStream()
       $rbuf = New-Object byte[] 65536
       $recvSeg = New-Object System.ArraySegment[byte] -ArgumentList (,$rbuf)
       $recvTask = $ws.ReceiveAsync($recvSeg, $cts.Token)
       $sbuf = New-Object byte[] 65536
+      $toSrv=0; $toVnc=0
+      W 'pump loop running'
       while($ws.State -eq [System.Net.WebSockets.WebSocketState]::Open -and $tcp.Connected){
         $did=$false
+        if($recvTask.IsFaulted){ W ('recv faulted: '+$recvTask.Exception.GetBaseException().Message); break }
         if($recvTask.IsCompleted){
           $res=$recvTask.Result
-          if($res.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close){ break }
-          if($res.Count -gt 0){ $stream.Write($rbuf,0,$res.Count); $stream.Flush() }
+          if($res.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close){ W 'WS close frame'; break }
+          if($res.Count -gt 0){ $stream.Write($rbuf,0,$res.Count); $stream.Flush(); $toVnc+=$res.Count; if($toVnc -le 65536){ W ("browser->vnc first bytes total="+$toVnc) } }
           $recvTask = $ws.ReceiveAsync($recvSeg, $cts.Token); $did=$true
         }
         if($stream.DataAvailable){
           $n=$stream.Read($sbuf,0,$sbuf.Length)
-          if($n -gt 0){ $seg=New-Object System.ArraySegment[byte] -ArgumentList $sbuf,0,$n; $ws.SendAsync($seg,[System.Net.WebSockets.WebSocketMessageType]::Binary,$true,$cts.Token).GetAwaiter().GetResult() }
+          if($n -gt 0){ $seg=New-Object System.ArraySegment[byte] -ArgumentList $sbuf,0,$n; $ws.SendAsync($seg,[System.Net.WebSockets.WebSocketMessageType]::Binary,$true,$cts.Token).GetAwaiter().GetResult(); $toSrv+=$n; if($toSrv -le 65536){ W ("vnc->browser first bytes total="+$toSrv) } }
           $did=$true
         }
         if(-not $did){ Start-Sleep -Milliseconds 5 }
       }
-    }catch{}
-    finally{ try{ $ws.Dispose() }catch{}; try{ $tcp.Close() }catch{} }
-  } -ArgumentList $Server,$token
+      W ("pump ended; wsState="+$ws.State+" tcpConnected="+$tcp.Connected+" sent2srv="+$toSrv+" sent2vnc="+$toVnc)
+    }catch{ W ('ERROR: '+$_.Exception.Message) }
+    finally{ try{ $ws.Dispose() }catch{}; try{ $tcp.Close() }catch{}; W 'tunnel closed' }
+  } -ArgumentList $Server,$token,$Dir
 }
 
 # ---- auto-install a VNC server (TightVNC) with a unique per-machine password, localhost-only ----

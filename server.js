@@ -1933,7 +1933,8 @@ async function main() {
   const vncBridges = new Map(); // deviceId -> { browser, agent }
   const wssVnc = new WebSocket.Server({ noServer: true });
   function linkBridge(id) {
-    const b = vncBridges.get(id); if (!b || !b.browser || !b.agent) return;
+    const b = vncBridges.get(id); if (!b || !b.browser || !b.agent) { console.log('[vnc]', id, 'link waiting: browser=' + !!(b && b.browser) + ' agent=' + !!(b && b.agent)); return; }
+    console.log('[vnc]', id, 'LINKED browser<->agent');
     const { browser, agent } = b; b.linked = true;
     const pipe = (from, to) => from.on('message', (data, isBinary) => { if (to.readyState === 1) to.send(data, { binary: isBinary }); });
     pipe(browser, agent); pipe(agent, browser);
@@ -1951,6 +1952,7 @@ async function main() {
           if (!u || u.disabled || (effPerms({ role: u.role, perms: u.perms }).devices || 0) < 2) return socket.destroy();
           const id = mb[1];
           wssVnc.handleUpgrade(req, socket, head, ws => {
+            console.log('[vnc]', id, 'browser WS connected');
             const b = vncBridges.get(id) || {}; if (b.browser) { try { b.browser.close(); } catch (e) {} } b.browser = ws; vncBridges.set(id, b);
             let sess = remoteSess.get(id); if (!sess) { sess = { until: 0, inputs: [] }; remoteSess.set(id, sess); } sess.vnc = true; sess.until = Date.now() + REMOTE_TTL;
             ws.on('close', () => { const bb = vncBridges.get(id); if (bb) { bb.browser = null; if (!bb.agent) vncBridges.delete(id); } const sx = remoteSess.get(id); if (sx) sx.vnc = false; });
@@ -1968,6 +1970,7 @@ async function main() {
           if (!dev) return socket.destroy();
           const id = dev.data.id;
           wssVnc.handleUpgrade(req, socket, head, ws => {
+            console.log('[vnc]', id, 'agent WS connected');
             const b = vncBridges.get(id) || {}; if (b.agent) { try { b.agent.close(); } catch (e) {} } b.agent = ws; vncBridges.set(id, b);
             ws.on('close', () => { const bb = vncBridges.get(id); if (bb) { bb.agent = null; if (!bb.browser) vncBridges.delete(id); } });
             linkBridge(id);
