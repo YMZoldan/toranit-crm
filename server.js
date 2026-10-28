@@ -1437,7 +1437,8 @@ const noCache = res => res.setHeader('Cache-Control', 'no-cache');
    runs commands queued by an admin. Every command is logged on the server (who, when, what, output). */
 
 let AGENT_PS1 = '# agent template missing on server';
-try { AGENT_PS1 = fs.readFileSync(path.join(__dirname, 'agent', 'toranit-agent.ps1'), 'utf8'); } catch (e) {}
+let AGENT_VER = '0';
+try { AGENT_PS1 = fs.readFileSync(path.join(__dirname, 'agent', 'toranit-agent.ps1'), 'utf8'); const mv = AGENT_PS1.match(/\$Ver\s*=\s*'([^']+)'/); if (mv) AGENT_VER = mv[1]; } catch (e) {}
 const ENROLL_COL = 'data/users/team/enrollkeys';
 const DEV_COL = 'data/users/team/devices';
 const devCmdCol = id => 'data/users/team/devcmds/' + id;
@@ -1556,7 +1557,7 @@ app.post('/api/agent/beat', agentAuth, express.json({ limit: '256kb' }), async (
       cmds = await grab();
     }
     if (aborted || res.writableEnded) return;
-    res.json({ commands: cmds, interval: 1, vnc: vncWanted() });
+    res.json({ commands: cmds, interval: 1, vnc: vncWanted(), agentVer: AGENT_VER });
   } catch (e) { next(e); }
 });
 
@@ -1636,6 +1637,17 @@ app.get('/api/agent/install.ps1', async (req, res, next) => {
     if (!ok) return res.status(401).send('# enroll key is missing or was revoked. Create a new one in the app under Computers (RMM).');
     const base = (req.get('X-Forwarded-Proto') || req.protocol) + '://' + req.get('host');
     res.send('﻿' + AGENT_PS1.replace('@@SERVER@@', base).replace('@@KEY@@', m[1]));
+  } catch (e) { next(e); }
+});
+
+/* self-update: an enrolled agent fetches the latest script using its own device token (no enroll key needed) */
+app.get('/api/agent/self.ps1', agentAuth, async (req, res, next) => {
+  try {
+    const base = (req.get('X-Forwarded-Proto') || req.protocol) + '://' + req.get('host');
+    let key = '';
+    try { const ek = (await pool.query('SELECT data FROM docs WHERE path = $1', [ENROLL_COL + '/' + req.device.enrollId])).rows[0]; if (ek && ek.data && ek.data.key) key = ek.data.key; } catch (e) {}
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.send('﻿' + AGENT_PS1.replace('@@SERVER@@', base).replace('@@KEY@@', key));
   } catch (e) { next(e); }
 });
 
@@ -1794,7 +1806,7 @@ app.post('/api/agent/remote', agentAuth, express.json({ limit: '8kb' }), async (
   const deadline = Date.now() + 25000;
   while (!r.active && !r.inputs.length && Date.now() < deadline && !aborted) { await new Promise(x => setTimeout(x, 400)); r = take(); }
   if (aborted || res.writableEnded) return;
-  res.json(Object.assign(r, { interval: r.active ? 120 : 1 }));
+  res.json(Object.assign(r, { interval: r.active ? 120 : 1, agentVer: AGENT_VER }));
 });
 
 /* admin: view the latest frame (control permission) */

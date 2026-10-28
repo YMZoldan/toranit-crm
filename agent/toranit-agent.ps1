@@ -25,6 +25,10 @@ function Load-State { if(Test-Path $State){ try{ return Get-Content -LiteralPath
 function MachineId { try{ (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid).MachineGuid }catch{ $env:COMPUTERNAME } }
 
 function Install-Agent {
+  # stop any previous agent instance so the freshly-registered task (MultipleInstances=IgnoreNew) can start the new code
+  try { Unregister-ScheduledTask -TaskName ($Task + 'User') -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+  try { Unregister-ScheduledTask -TaskName $Task -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+  try { Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*toranit-agent.ps1*-Run*' -or $_.CommandLine -like '*toranit-agent.ps1*-User*' } | Where-Object { $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } } catch {}
   New-Item -ItemType Directory -Force -Path $Dir | Out-Null
   # keep an on-disk copy of this script so the scheduled task runs it
   try { Invoke-WebRequest "$Server/api/agent/install.ps1?key=$Key" -OutFile (Join-Path $Dir 'toranit-agent.ps1') -UseBasicParsing }
@@ -32,7 +36,8 @@ function Install-Agent {
   $file = Join-Path $Dir 'toranit-agent.ps1'
   $act  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Run' -f $file)
   $t1   = New-ScheduledTaskTrigger -AtStartup
-  $t2   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
+  # repeats every minute as a watchdog AND to relaunch quickly after a self-update exit
+  $t2   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
   $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
   $set  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   Register-ScheduledTask -TaskName $Task -Action $act -Trigger $t1,$t2 -Principal $prin -Settings $set -Force | Out-Null
@@ -41,7 +46,9 @@ function Install-Agent {
   $uact = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -User' -f $file)
   $uprin = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
   $uset = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-  Register-ScheduledTask -TaskName ($Task + 'User') -Action $uact -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Principal $uprin -Settings $uset -Force | Out-Null
+  $ut1  = New-ScheduledTaskTrigger -AtLogOn
+  $ut2  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+  Register-ScheduledTask -TaskName ($Task + 'User') -Action $uact -Trigger $ut1,$ut2 -Principal $uprin -Settings $uset -Force | Out-Null
   try { Start-ScheduledTask -TaskName ($Task + 'User') } catch {}
   # register in Add/Remove Programs so it can be uninstalled from Settings > Apps
   try {
@@ -65,6 +72,25 @@ function Uninstall-Agent {
   Remove-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ToranitAgent' -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue
   Write-Host "Toranit Agent removed." -ForegroundColor Yellow
+}
+# ---- self-update: fetch the latest script from the server and relaunch (no manual reinstall) ----
+function Self-Update($token,$latest){
+  if(-not $latest -or $latest -eq $Ver){ return }
+  $ulog = Join-Path $Dir 'update.log'
+  try{
+    $tmp = Join-Path $Dir 'toranit-agent.new.ps1'
+    Invoke-WebRequest ($Server+'/api/agent/self.ps1') -Headers @{Authorization="Bearer $token"} -OutFile $tmp -UseBasicParsing -TimeoutSec 60
+    $txt = Get-Content $tmp -Raw
+    if($txt -and $txt.Length -gt 5000 -and $txt -match 'Toranit Agent'){
+      Copy-Item -LiteralPath $tmp -Destination (Join-Path $Dir 'toranit-agent.ps1') -Force
+      Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+      try{ Add-Content $ulog ((Get-Date -Format s)+" updated $Ver -> $latest; restarting") }catch{}
+      # exit; the scheduled task's repetition trigger relaunches us running the new script
+      exit
+    } else {
+      try{ Add-Content $ulog ((Get-Date -Format s)+" downloaded script looked invalid (len=$($txt.Length))") }catch{}
+    }
+  }catch{ try{ Add-Content $ulog ((Get-Date -Format s)+" update failed: "+$_.Exception.Message) }catch{} }
 }
 
 function Call($path, $body, $token){
@@ -185,6 +211,7 @@ public class RI {
   while($true){
     try{
       $r=Call '/api/agent/remote' @{} $token
+      if($r.agentVer -and $r.agentVer -ne $Ver){ ULog ("version changed $Ver -> "+$r.agentVer+"; exiting to relaunch"); exit }
       if($r.active){
         if(-not $shown){ [RI]::ShowWindow($bh,8) | Out-Null; $shown=$true }   # SW_SHOWNA
         [RI]::SetWindowPos($bh,[IntPtr](-1),0,0,0,0,0x13) | Out-Null           # HWND_TOPMOST, NOSIZE|NOMOVE|NOACTIVATE
@@ -363,6 +390,7 @@ while($true){
     if($script:pendSoftware){ $beat.software=@(Get-Software); $script:pendSoftware=$false }
     if($script:pendUpdates){ $beat.updates=(Get-PendingUpdates); $script:pendUpdates=$false }
     $resp=Call '/api/agent/beat' $beat $token
+    Self-Update $token $resp.agentVer
     if($resp.interval){ $interval=[int]$resp.interval }
     if($resp.vnc){ Start-VncTunnel $token }
     foreach($c in $resp.commands){
