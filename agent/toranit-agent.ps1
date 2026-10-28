@@ -9,7 +9,7 @@
   Uninstall:
     & "$env:ProgramData\ToranitAgent\toranit-agent.ps1" -Uninstall
 #>
-param([switch]$Run, [switch]$Uninstall, [switch]$User, [switch]$Diag)
+param([switch]$Run, [switch]$Uninstall, [switch]$User, [switch]$Diag, [switch]$VncDiag)
 
 $Server = '@@SERVER@@'
 $Key    = '@@KEY@@'
@@ -229,7 +229,29 @@ public class RID { [DllImport("user32.dll")] public static extern bool SetCursor
 }
 
 if($Uninstall){ Uninstall-Agent; return }
+# ---- VNC diagnostics: run as the logged-on user in a normal PowerShell window ----
+function Run-VncDiag {
+  $ok={param($m);Write-Host ("[ OK ] "+$m) -ForegroundColor Green}
+  $bad={param($m);Write-Host ("[FAIL] "+$m) -ForegroundColor Red}
+  $info={param($m);Write-Host $m -ForegroundColor Cyan}
+  &$info "== Toranit VNC diagnostics =="
+  $svc=Get-Service tvnserver -ErrorAction SilentlyContinue
+  if($svc){ &$ok ("TightVNC service status: "+$svc.Status) } else { &$bad "TightVNC service NOT installed" }
+  $proc=Get-Process tvnserver -ErrorAction SilentlyContinue
+  if($proc){ &$ok "tvnserver process is running" } else { &$bad "tvnserver process not running" }
+  try{
+    $c=New-Object System.Net.Sockets.TcpClient; $c.Connect('127.0.0.1',5900); $ns=$c.GetStream(); Start-Sleep -Milliseconds 400
+    $buf=New-Object byte[] 12; $n=$ns.Read($buf,0,12); $banner=[System.Text.Encoding]::ASCII.GetString($buf,0,$n).Trim(); $c.Close()
+    if($banner -like 'RFB*'){ &$ok ("VNC answering on 127.0.0.1:5900 ("+$banner+")") } else { &$bad ("port 5900 open but no RFB banner: '"+$banner+"'") }
+  }catch{ &$bad ("cannot connect to 127.0.0.1:5900 - "+$_.Exception.Message) }
+  if(Test-Path $VncFile){ try{ $vj=Get-Content $VncFile -Raw|ConvertFrom-Json; &$ok ("password file present (pass length "+($vj.pass.Length)+", ready="+$vj.ready+")") }catch{ &$bad "vnc.json unreadable" } } else { &$bad "vnc.json missing - VNC not configured yet (install may still be running or failed)" }
+  $log=Join-Path $Dir 'vnc-install.log'
+  if(Test-Path $log){ &$info "--- vnc-install.log (last 20 lines) ---"; Get-Content $log | Select-Object -Last 20 } else { Write-Host "no vnc-install.log yet (install not started)" -ForegroundColor Yellow }
+  &$info "== Done. Copy everything above and send it to support. =="
+}
+
 if($Diag){ Run-Diag; return }
+if($VncDiag){ Run-VncDiag; return }
 if($User){ Run-UserHelper; return }
 if(-not $Run){ Install-Agent; return }
 
