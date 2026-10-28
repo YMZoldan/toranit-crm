@@ -1564,7 +1564,9 @@ app.post('/api/agent/result', agentAuth, express.json({ limit: '256kb' }), async
     const row = (await pool.query('SELECT path, data FROM docs WHERE path = $1', [devCmdCol(dev.id) + '/' + id])).rows[0];
     if (!row) return res.json({ ok: true });
     const c = row.data; c.status = b.exit === 0 || b.status === 'done' ? 'done' : 'error';
-    c.exit = Number.isFinite(+b.exit) ? +b.exit : null; c.output = String(b.output == null ? '' : b.output).slice(0, CMD_MAX_OUT); c.finished = Date.now();
+    c.exit = Number.isFinite(+b.exit) ? +b.exit : null;
+    let ob = b.output, os = typeof ob === 'string' ? ob : (ob == null ? '' : (() => { try { return JSON.stringify(ob, null, 2); } catch (e) { return String(ob); } })());
+    c.output = os.slice(0, CMD_MAX_OUT); c.finished = Date.now();
     await writeDoc(row.path, c, null);
     res.json({ ok: true });
   } catch (e) { next(e); }

@@ -95,10 +95,10 @@ function Get-PendingUpdates {
 function Run-Shell($cmd,$shell,$timeout){
   $sb = if($shell -eq 'cmd'){ { param($c) & cmd.exe /c $c 2>&1 | Out-String } } else { { param($c) powershell -NoProfile -ExecutionPolicy Bypass -Command $c 2>&1 | Out-String } }
   $job=Start-Job -ScriptBlock $sb -ArgumentList $cmd
-  if(Wait-Job $job -Timeout $timeout){ $out=Receive-Job $job; $st='done'; $ex=0 }
+  if(Wait-Job $job -Timeout $timeout){ $out=[string](Receive-Job $job 2>&1 | Out-String); $st='done'; $ex=0 }
   else { Stop-Job $job -ErrorAction SilentlyContinue; $out="[command timed out after $timeout seconds and was cancelled]"; $st='error'; $ex=124 }
   Remove-Job $job -Force -ErrorAction SilentlyContinue
-  return @{ output=$out; status=$st; exit=$ex }
+  return @{ output=[string]$out; status=$st; exit=$ex }
 }
 
 # ---- user-session helper: screen view + input control (runs as the logged-on user, not SYSTEM) ----
@@ -252,7 +252,7 @@ while($true){
         'sysinfo'  { $m=Get-Metrics; $res=@{ output=($m | ConvertTo-Json); status='done'; exit=0 } }
         default    { $res=Run-Shell $c.cmd $c.shell ([int]$c.timeout) }
       }
-      try{ Call '/api/agent/result' @{ id=$c.id; output=$res.output; status=$res.status; exit=$res.exit } $token | Out-Null }catch{}
+      try{ Call '/api/agent/result' @{ id=$c.id; output=([string]$res.output); status=$res.status; exit=$res.exit } $token | Out-Null }catch{}
     }
   }catch{
     if($_.Exception.Response.StatusCode.value__ -eq 401){ Remove-Item -LiteralPath $State -Force -ErrorAction SilentlyContinue }
