@@ -9,11 +9,11 @@
   Uninstall:
     & "$env:ProgramData\ToranitAgent\toranit-agent.ps1" -Uninstall
 #>
-param([switch]$Run, [switch]$Uninstall, [switch]$User, [switch]$Diag, [switch]$VncDiag)
+param([switch]$Run, [switch]$Uninstall, [switch]$User, [switch]$Diag, [switch]$VncDiag, [switch]$NoArp)
 
 $Server = '@@SERVER@@'
 $Key    = '@@KEY@@'
-$Ver    = '1.29.0'
+$Ver    = '1.30.0'
 $Dir    = Join-Path $env:ProgramData 'ToranitAgent'
 $State  = Join-Path $Dir 'state.json'
 $VncFile = Join-Path $Dir 'vnc.json'
@@ -51,7 +51,8 @@ function Install-Agent {
   Register-ScheduledTask -TaskName ($Task + 'User') -Action $uact -Trigger $ut1,$ut2 -Principal $uprin -Settings $uset -Force | Out-Null
   try { Start-ScheduledTask -TaskName ($Task + 'User') } catch {}
   # register in Add/Remove Programs so it can be uninstalled from Settings > Apps
-  try {
+  # (skipped with -NoArp: when installed by the Toranit setup.exe, that installer owns the Add/Remove entry)
+  if(-not $NoArp){ try {
     $uk = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ToranitAgent'
     New-Item -Path $uk -Force | Out-Null
     Set-ItemProperty $uk -Name DisplayName -Value 'Toranit Remote Agent'
@@ -61,7 +62,7 @@ function Install-Agent {
     Set-ItemProperty $uk -Name UninstallString -Value ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $file + '" -Uninstall')
     Set-ItemProperty $uk -Name NoModify -Value 1 -Type DWord
     Set-ItemProperty $uk -Name NoRepair -Value 1 -Type DWord
-  } catch {}
+  } catch {} }
   Write-Host "Toranit Agent installed and started (tasks '$Task' and '${Task}User')." -ForegroundColor Green
 }
 function Uninstall-Agent {
@@ -99,7 +100,10 @@ function Call($path, $body, $token){
   return Invoke-RestMethod -Uri ($Server + $path) -Method Post -Headers $h -ContentType 'application/json; charset=utf-8' -Body $json -TimeoutSec 60
 }
 function Enroll {
-  $r = Call '/api/agent/enroll' @{ key=$Key; hostname=$env:COMPUTERNAME; os=((Get-CimInstance Win32_OperatingSystem).Caption); machineId=(MachineId); agentVer=$Ver }
+  $body = @{ key=$Key; hostname=$env:COMPUTERNAME; os=((Get-CimInstance Win32_OperatingSystem).Caption); machineId=(MachineId); agentVer=$Ver }
+  $cf = Join-Path $Dir 'consent.json'
+  if(Test-Path $cf){ try{ $body.consent = (Get-Content $cf -Raw | ConvertFrom-Json) }catch{} }
+  $r = Call '/api/agent/enroll' $body
   Save-State @{ deviceId=$r.deviceId; token=$r.token }
   return $r.token
 }
@@ -387,6 +391,8 @@ while($true){
     Ensure-VncInstalled
     $beat=@{ agentVer=$Ver; metrics=(Get-Metrics) }
     if(Test-Path $VncFile){ try{ $vj=Get-Content $VncFile -Raw|ConvertFrom-Json; if($vj.pass){ $beat.vncPass=$vj.pass; $beat.vncReady=[bool]$vj.ready } }catch{} }
+    # include the tail of the VNC tunnel log so remote VNC problems can be diagnosed from the CRM (no console needed)
+    try{ $tl=Join-Path $Dir 'vnc-tunnel.log'; if(Test-Path $tl){ $beat.vncLog=((Get-Content $tl -Tail 15) -join "`n") } }catch{}
     if($script:pendSoftware){ $beat.software=@(Get-Software); $script:pendSoftware=$false }
     if($script:pendUpdates){ $beat.updates=(Get-PendingUpdates); $script:pendUpdates=$false }
     $resp=Call '/api/agent/beat' $beat $token

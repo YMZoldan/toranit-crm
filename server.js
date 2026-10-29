@@ -1439,6 +1439,9 @@ const noCache = res => res.setHeader('Cache-Control', 'no-cache');
 let AGENT_PS1 = '# agent template missing on server';
 let AGENT_VER = '0';
 try { AGENT_PS1 = fs.readFileSync(path.join(__dirname, 'agent', 'toranit-agent.ps1'), 'utf8'); const mv = AGENT_PS1.match(/\$Ver\s*=\s*'([^']+)'/); if (mv) AGENT_VER = mv[1]; } catch (e) {}
+let SETUP_EXE = null;
+try { SETUP_EXE = fs.readFileSync(path.join(__dirname, 'agent', 'installer', 'ToranitAgentSetup.exe')); } catch (e) {}
+const SETUP_KEY_PH = Buffer.from('ek_0000000000000000000000000000000000000000', 'utf16le'); // placeholder patched per enroll key
 const ENROLL_COL = 'data/users/team/enrollkeys';
 const DEV_COL = 'data/users/team/devices';
 const devCmdCol = id => 'data/users/team/devcmds/' + id;
@@ -1448,7 +1451,8 @@ const CMD_MAX_OUT = 60 * 1024;           // keep command output bounded
 const devOnline = d => Date.now() - (d.lastSeen || 0) < DEV_OFFLINE_MS;
 const pubDevice = d => ({ id: d.id, name: d.name || d.hostname || d.id, hostname: d.hostname || '', os: d.os || '', customerId: d.customerId || null,
   created: d.created, lastSeen: d.lastSeen || null, online: devOnline(d), agentVer: d.agentVer || '', ip: d.ip || '', note: d.note || '',
-  metrics: d.metrics || null, software: d.software ? d.software.length : 0, updates: d.updates || null });
+  metrics: d.metrics || null, software: d.software ? d.software.length : 0, updates: d.updates || null,
+  vncReady: !!d.vncReady, vncLog: d.vncLog || '', consent: d.consent || null });
 
 /* enrollment keys (one per customer/site, reusable to enroll many machines) */
 app.get('/api/enrollkeys', auth, async (req, res, next) => {
@@ -1483,6 +1487,27 @@ app.get('/api/enrollkeys/:id/install.cmd', auth, async (req, res, next) => {
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', 'attachment; filename="Toranit-Agent.cmd"; filename*=UTF-8\'\'' + encodeURIComponent('התקנת-סוכן-' + safe + '.cmd'));
     res.send(cmd);
+  } catch (e) { next(e); }
+});
+
+/* a real Windows installer (.exe) with a setup wizard; the enroll key is patched into the template per download */
+app.get('/api/enrollkeys/:id/setup.exe', auth, async (req, res, next) => {
+  try {
+    if (!can(req, 'devices', 2)) return denied(res);
+    if (!/^[a-f0-9]{16}$/.test(req.params.id)) return bad(res, 'bad id');
+    const row = (await pool.query('SELECT data FROM docs WHERE path = $1', [ENROLL_COL + '/' + req.params.id])).rows[0];
+    if (!row || !row.data.key) return res.status(404).json({ code: 'not_found', message: 'המפתח לא נמצא' });
+    if (!SETUP_EXE) return res.status(503).json({ code: 'unavailable', message: 'קובץ ההתקנה אינו זמין בשרת (העלה גרסה חדשה)' });
+    const rk = Buffer.from(row.data.key, 'utf16le');
+    if (rk.length !== SETUP_KEY_PH.length) return res.status(500).json({ code: 'error', message: 'bad key length' });
+    const buf = Buffer.from(SETUP_EXE); // clone the cached template
+    const idx = buf.indexOf(SETUP_KEY_PH);
+    if (idx < 0) return res.status(500).json({ code: 'error', message: 'installer template has no key slot' });
+    rk.copy(buf, idx);
+    const safe = (row.data.label || 'site').replace(/[^\w֐-׿ .-]/g, '').slice(0, 40) || 'site';
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'attachment; filename="Toranit-Setup.exe"; filename*=UTF-8\'\'' + encodeURIComponent('התקנה-' + safe + '.exe'));
+    res.send(buf);
   } catch (e) { next(e); }
 });
 app.delete('/api/enrollkeys/:id', auth, csrf, async (req, res, next) => {
@@ -1525,6 +1550,9 @@ app.post('/api/agent/enroll', express.json({ limit: '8kb' }), async (req, res, n
         name: hostname, hostname, os: str(b.os, 120), agentVer: str(b.agentVer, 20), ip: clientIp(req), created: Date.now(), lastSeen: Date.now(), metrics: null };
       const d = ek.data; d.devices = (d.devices || 0) + 1; await writeDoc(ENROLL_COL + '/' + d.id, d, null);
     }
+    if (b.consent && typeof b.consent === 'object' && !dev.consent) {
+      dev.consent = { accepted: !!b.consent.accepted, at: str(b.consent.at, 40), user: str(b.consent.user, 120), host: str(b.consent.host, 80), via: str(b.consent.via, 40) };
+    }
     await writeDoc(DEV_COL + '/' + dev.id, dev, null);
     res.json({ deviceId: dev.id, token, interval: 30 });
   } catch (e) { next(e); }
@@ -1540,6 +1568,7 @@ app.post('/api/agent/beat', agentAuth, express.json({ limit: '256kb' }), async (
     if (b.updates && typeof b.updates === 'object') dev.updates = { count: +b.updates.count || 0, titles: Array.isArray(b.updates.titles) ? b.updates.titles.slice(0, 50).map(t => str(t, 160)) : [], at: Date.now() };
     if (b.vncPass) dev.vncPass = str(b.vncPass, 32);
     if (b.vncReady != null) dev.vncReady = !!b.vncReady;
+    if (b.vncLog != null) dev.vncLog = str(b.vncLog, 2000);
     await writeDoc(DEV_COL + '/' + dev.id, dev, null);
     // long-poll: hold the request briefly and return as soon as a command is queued, so the console feels instant
     const grab = async () => {
