@@ -13,7 +13,7 @@ param([switch]$Run, [switch]$Uninstall, [switch]$User, [switch]$Diag, [switch]$V
 
 $Server = '@@SERVER@@'
 $Key    = '@@KEY@@'
-$Ver    = '1.30.0'
+$Ver    = '1.30.1'
 $Dir    = Join-Path $env:ProgramData 'ToranitAgent'
 $State  = Join-Path $Dir 'state.json'
 $VncFile = Join-Path $Dir 'vnc.json'
