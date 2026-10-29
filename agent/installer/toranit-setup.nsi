@@ -60,31 +60,15 @@ BrandingText "${COMPANY}"
 Section "Install"
   SetOutPath "$INSTDIR"
 
-  ; 1) record the user's consent locally (the agent forwards it to the server on enrollment)
-  DetailPrint "רושם את אישור המשתמש..."
-  FileOpen $9 "$PLUGINSDIR\consent.ps1" w
-  FileWriteWord $9 65279   ; UTF-16LE BOM so PowerShell reads the generated script correctly
-  FileWrite $9 "$$d=Join-Path $$env:ProgramData 'ToranitAgent'; New-Item -ItemType Directory -Force $$d | Out-Null$\r$\n"
-  FileWrite $9 "@{accepted=$$true; at=(Get-Date -Format s); user=$$env:USERNAME; host=$$env:COMPUTERNAME; via='setup.exe'} | ConvertTo-Json -Compress | Set-Content (Join-Path $$d 'consent.json') -Encoding UTF8$\r$\n"
-  FileClose $9
-  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\consent.ps1"'
-  Pop $0
-
-  ; 2) download the agent script (server fills in server URL + key) and install it (-NoArp: this installer owns the Add/Remove entry)
-  DetailPrint "מוריד ומתקין את סוכן התמיכה..."
-  FileOpen $9 "$PLUGINSDIR\bootstrap.ps1" w
-  FileWriteWord $9 65279   ; UTF-16LE BOM so PowerShell reads the generated script correctly
-  FileWrite $9 "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12$\r$\n"
-  FileWrite $9 "$$u='${SERVERURL}/api/agent/install.ps1?key=${ENROLLKEY}'$\r$\n"
-  FileWrite $9 "$$p=Join-Path $$env:TEMP 'ta.ps1'$\r$\n"
-  FileWrite $9 "Invoke-WebRequest $$u -OutFile $$p -UseBasicParsing -TimeoutSec 120$\r$\n"
-  FileWrite $9 "& $$p -NoArp$\r$\n"
-  FileClose $9
-  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$PLUGINSDIR\bootstrap.ps1"'
+  ; Install the agent via ONE inline PowerShell command (no generated .ps1 files, so no text-encoding pitfalls).
+  ; It records the user's consent, downloads the agent (server fills in URL + key), installs it with -NoArp
+  ; (this installer owns the Add/Remove entry), and writes a transcript to %ProgramData%\toranit-setup.log.
+  DetailPrint "מתקין את סוכן התמיכה..."
+  nsExec::ExecToLog "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command $\"$$ErrorActionPreference='Continue'; Start-Transcript -Path ($$env:ProgramData+'\toranit-setup.log') -Force | Out-Null; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $$d=$$env:ProgramData+'\ToranitAgent'; New-Item -ItemType Directory -Force $$d | Out-Null; @{accepted=$$true;at=(Get-Date -Format s);user=$$env:USERNAME;host=$$env:COMPUTERNAME;via='setup.exe'} | ConvertTo-Json -Compress | Set-Content ($$d+'\consent.json'); $$k='${ENROLLKEY}'; $$p=$$env:TEMP+'\ta.ps1'; Invoke-WebRequest ('${SERVERURL}/api/agent/install.ps1?key='+$$k) -OutFile $$p -UseBasicParsing -TimeoutSec 120; Write-Output ('downloaded '+((Get-Item $$p).Length)+' bytes'); & $$p -NoArp; Stop-Transcript | Out-Null$\""
   Pop $0
   DetailPrint "קוד התקנה: $0"
 
-  ; 3) uninstaller + Add/Remove Programs entry
+  ; uninstaller + Add/Remove Programs entry
   DetailPrint "משלים את ההתקנה..."
   WriteUninstaller "$INSTDIR\uninstall.exe"
   WriteRegStr HKLM "${ARPKEY}" "DisplayName" "${APPNAME}"
