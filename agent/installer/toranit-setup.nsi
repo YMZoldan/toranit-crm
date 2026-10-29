@@ -10,7 +10,7 @@ CRCCheck off               ; allow the server to patch the enroll key placeholde
 
 !define APPNAME   "Toranit Remote Support"
 !define COMPANY   "Toranit"
-!define APPVER    "1.30.1"
+!define APPVER    "1.30.2"
 !ifndef SERVERURL
   !define SERVERURL "https://crm.toranit.co.il"
 !endif

@@ -13,7 +13,7 @@ param([switch]$Run, [switch]$Uninstall, [switch]$User, [switch]$Diag, [switch]$V
 
 $Server = '@@SERVER@@'
 $Key    = '@@KEY@@'
-$Ver    = '1.30.1'
+$Ver    = '1.30.2'
 $Dir    = Join-Path $env:ProgramData 'ToranitAgent'
 $State  = Join-Path $Dir 'state.json'
 $VncFile = Join-Path $Dir 'vnc.json'
@@ -381,6 +381,38 @@ function Ensure-VncInstalled {
   } -ArgumentList $VncFile,$Server
 }
 
+# ---- make sure TightVNC is actually LISTENING on 127.0.0.1:5900 ----
+# The TightVNC MSI's silent-config (SET_RFBPORT/SET_PASSWORD/...) often does not persist, leaving the
+# service running with an empty config and no listening port. We write the config to the registry
+# directly and restart the service. Loopback-only: the port is reachable only from this machine, i.e.
+# only through our authenticated reverse tunnel, so no VNC password is needed and nothing is exposed to the LAN.
+function Set-VncReg($name,$val){ New-ItemProperty -Path 'HKLM:\SOFTWARE\TightVNC\Server' -Name $name -Value $val -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null }
+$script:vncCfgAt = 0
+function Ensure-VncListening {
+  $svc = Get-Service tvnserver -ErrorAction SilentlyContinue
+  if(-not $svc){ return }
+  $ok=$false; try{ $c=New-Object System.Net.Sockets.TcpClient; $c.Connect('127.0.0.1',5900); $ok=$true; $c.Close() }catch{}
+  if($ok){ return }
+  $now=(Get-Date).Ticks
+  if($script:vncCfgAt -ne 0 -and ($now-$script:vncCfgAt) -lt [TimeSpan]::FromMinutes(3).Ticks){ return }
+  $script:vncCfgAt=$now
+  $log=Join-Path $Dir 'vnc-install.log'
+  try{
+    New-Item -Path 'HKLM:\SOFTWARE\TightVNC\Server' -Force -ErrorAction SilentlyContinue | Out-Null
+    Set-VncReg 'AcceptRfbConnections' 1
+    Set-VncReg 'RfbPort' 5900
+    Set-VncReg 'UseVncAuthentication' 0
+    Set-VncReg 'AllowLoopback' 1
+    Set-VncReg 'LoopbackOnly' 1
+    Set-VncReg 'AcceptHttpConnections' 0
+    try{ Restart-Service tvnserver -Force -ErrorAction Stop }
+    catch{ try{ Stop-Service tvnserver -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 800; Start-Service tvnserver -ErrorAction SilentlyContinue }catch{} }
+    Start-Sleep -Seconds 2
+    $ok2=$false; try{ $c2=New-Object System.Net.Sockets.TcpClient; $c2.Connect('127.0.0.1',5900); $ok2=$true; $c2.Close() }catch{}
+    Add-Content $log ((Get-Date -Format s)+" reconfigured TightVNC (port 5900, loopback-only, no-auth); listening=$ok2")
+  }catch{ Add-Content $log ((Get-Date -Format s)+" reconfigure failed: "+$_.Exception.Message) }
+}
+
 # ---- run loop ----
 $script:pendSoftware=$false; $script:pendUpdates=$false
 $interval=30
@@ -389,6 +421,7 @@ while($true){
     $s=Load-State; $token=if($s){$s.token}else{$null}
     if(-not $token){ $token=Enroll }
     Ensure-VncInstalled
+    Ensure-VncListening
     $beat=@{ agentVer=$Ver; metrics=(Get-Metrics) }
     if(Test-Path $VncFile){ try{ $vj=Get-Content $VncFile -Raw|ConvertFrom-Json; if($vj.pass){ $beat.vncPass=$vj.pass; $beat.vncReady=[bool]$vj.ready } }catch{} }
     # include the tail of the VNC tunnel log so remote VNC problems can be diagnosed from the CRM (no console needed)
